@@ -1,53 +1,74 @@
 # Qt6 手眼标定工具
 
-这是一个基于 Qt 6 Widgets + OpenCV 的离线手眼标定桌面工具。当前版本通过 CSV/JSON 导入机器人末端与标定板位姿，支持五种 OpenCV 手眼标定算法并提供结果误差摘要。
+基于 Qt 6、OpenCV 和 Eigen 的手眼标定桌面工具，面向“输入标准化 → 标定可靠性 → 数据验证 → 工程导出”的使用流程。
 
-## 已实现功能
+## 已支持功能
 
-- Tsai-Lenz、Park-Martin、Horaud、Andreff、Daniilidis 五种算法
-- 眼在手/眼在外模式选择、样本表格、示例数据生成
-- CSV/JSON 导入与导出
-- 旋转/平移误差摘要、4×4 齐次矩阵预览、运行日志
-- `--smoke-test` 无界面运行入口，用于验证五种算法和运行时依赖
+- 五种 OpenCV 手眼标定算法：Tsai-Lenz、Park-Martin、Horaud、Andreff、Daniilidis。
+- 自动计算全部算法，并按可靠性报告推荐结果。
+- 输入姿态格式：Rodrigues、Euler XYZ、RPY、Quaternion（WXYZ）。
+- 角度单位：degree/rad；长度单位：mm/m，导入时统一转换为内部的 rad/m。
+- 明确记录并展示方向：`gripper → base`、`target → camera`、输出 `camera → gripper`。
+- Eye-To-Hand 当前在界面中禁用，避免使用尚未完成的流程。
+- 相对运动退化检测：样本数量、重复样本、旋转激励、旋转轴分布和有限值检查。
+- 真实 RMSE、平均误差、最大误差、单样本残差和异常样本标记。
+- 支持独立验证数据集，并输出是否通过验证。
+- 合成真值测试，验证矩阵方向、数值误差、单位归一化、异常检测和退化检测。
+- 机器人 Pose Adapter：Generic、Universal Robots、KUKA、FANUC。
+- 矩阵导出：JSON、YAML、TXT、C++、Python；JSON 同时保存机器人、相机、单位、算法、日期和误差信息。
 
 ## 构建
 
-本机 Qt 6.9.3 和 OpenCV 4.12 的构建命令示例：
-
-```powershell
-cmake -S . -B build/handeye_mvp `
-  -DOpenCV_DIR=C:/opencv/build/x64/vc16/lib `
-  -DCMAKE_PREFIX_PATH=C:/Qt/6.9.3/msvc2022_64 `
-  -DCMAKE_BUILD_TYPE=Debug
-cmake --build build/handeye_mvp --config Debug
-```
-
-如果 Qt Creator 仍缓存了错误的 `OpenCV_DIR=C:/opencv/build`，CMake 会自动回退到本机兼容目录 `C:/opencv/build/x64/vc16/lib`。也可以显式指定：
-
-```powershell
-cmake -S . -B build/handeye_mvp `
-  -DHAND_EYE_OPENCV_DIR=C:/opencv/build/x64/vc16/lib
-```
-
-运行时需要将 Qt 的 `bin` 和 OpenCV 的 `build/x64/vc16/bin` 加入 `PATH`。在 Windows 上也可以把这些 DLL 复制到可执行文件目录，便于发布。
-
-## 数据方向与 CSV 格式
-
-每组样本包含：
+项目使用 Qt 6.9.3 MSVC 2022 64-bit 和 OpenCV 4.x。CMake 会优先查找 `OpenCV_DIR`；如果发现配置文件存在但 `OpenCV_FOUND=FALSE`，会自动回退到常见的：
 
 ```text
-gripper2base = [R_gripper2base, t_gripper2base]
-target2cam   = [R_target2cam, t_target2cam]
+C:/opencv/build/x64/vc16/lib
 ```
 
-旋转使用 Rodrigues 旋转向量（弧度），平移使用界面中声明的单位。CSV 表头为：
+也可以显式指定：
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DOpenCV_DIR=C:/opencv/build/x64/vc16/lib
+cmake --build build --config Release
+```
+
+如果 OpenCV 安装在其他位置，请设置 `-DHAND_EYE_OPENCV_DIR=...` 或 `-DOpenCV_DIR=...`。
+
+## CSV 输入
+
+训练数据和独立验证数据均可通过界面导入 CSV。每行支持：
 
 ```text
-id,label,gripper_rx,gripper_ry,gripper_rz,gripper_tx,gripper_ty,gripper_tz,target_rx,target_ry,target_rz,target_tx,target_ty,target_tz
+id, gripper_tx, gripper_ty, gripper_tz, gripper_r1, gripper_r2, gripper_r3, target_tx, target_ty, target_tz, target_r1, target_r2, target_r3
 ```
 
-OpenCV 输出的核心结果方向为 `camera → gripper`。建议采集至少 10 组、绕多个轴有明显旋转变化的样本；少于 3 组或运动退化时程序会阻止计算或给出警告。
+旋转列数量为 3 时表示 Rodrigues、Euler XYZ 或 RPY；Quaternion 模式使用 4 个旋转值。导入前在界面选择姿态格式、角度单位、长度单位和 Pose Adapter。
 
-## 调研与设计
+内部统一采用：
 
-设计说明和分步实施计划位于 `docs/plans/`。GitHub 调研重点参考了 OpenCV 的手眼实现、easy_handeye2、JonesCVBS 的 OpenCV 示例和 AgileX ROS2 工具。
+```text
+gripper_to_base + target_to_camera → camera_to_gripper
+```
+
+## 冒烟测试
+
+Debug 构建后直接运行程序会执行合成数据冒烟测试，检查：
+
+- 五种算法是否返回结果；
+- 推荐矩阵与合成真值的误差；
+- degree/mm 输入归一化；
+- 独立验证、异常样本、相对运动退化检测；
+- JSON/YAML/TXT/C++/Python 导出与 CSV/JSON 读回。
+
+## 目录结构
+
+```text
+src/
+  core/       标定服务、姿态转换、数据验证、合成数据
+  domain/     数据模型、算法和方向定义
+  io/         CSV/JSON/YAML/代码导出、Pose Adapter
+  models/     Qt 表格模型
+  mainwindow  Qt 6 用户界面
+docs/plans/   功能设计与实施计划
+```

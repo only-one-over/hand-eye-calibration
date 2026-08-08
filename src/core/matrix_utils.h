@@ -13,5 +13,6 @@ cv::Matx44d toMat(const Matrix4 &matrix);
 cv::Matx44d inverse(const cv::Matx44d &matrix);
 double rotationAngleDeg(const cv::Matx33d &rotation);
 bool isFinite(const Vector3 &value);
+bool isFinite(const Vector4 &value);
 
 } // namespace handeye::matrix

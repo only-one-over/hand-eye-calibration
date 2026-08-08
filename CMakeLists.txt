@@ -46,6 +46,8 @@ set(PROJECT_SOURCES
     src/domain/calibration_types.h
     src/core/matrix_utils.cpp
     src/core/matrix_utils.h
+    src/core/pose_conversion.cpp
+    src/core/pose_conversion.h
     src/core/dataset_validator.cpp
     src/core/dataset_validator.h
     src/core/synthetic_dataset.cpp
@@ -54,6 +56,8 @@ set(PROJECT_SOURCES
     src/core/calibration_service.h
     src/io/dataset_io.cpp
     src/io/dataset_io.h
+    src/io/pose_adapter.cpp
+    src/io/pose_adapter.h
     src/models/calibration_session_model.cpp
     src/models/calibration_session_model.h
     ${TS_FILES}

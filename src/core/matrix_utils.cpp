@@ -77,4 +77,9 @@ bool isFinite(const Vector3 &value)
     return std::all_of(value.begin(), value.end(), [](double item) { return std::isfinite(item); });
 }
 
+bool isFinite(const Vector4 &value)
+{
+    return std::all_of(value.begin(), value.end(), [](double item) { return std::isfinite(item); });
+}
+
 } // namespace handeye::matrix
