@@ -36,6 +36,41 @@ QJsonArray matrixToJson(const Matrix4 &matrix)
     return rows;
 }
 
+QJsonArray matrix3ToJson(const Matrix3 &matrix)
+{
+    QJsonArray rows;
+    for (const auto &row : matrix) rows.append(QJsonArray{row[0], row[1], row[2]});
+    return rows;
+}
+
+QJsonArray vector5ToJson(const Vector5 &value)
+{
+    QJsonArray array;
+    for (double item : value) array.append(item);
+    return array;
+}
+
+Vector5 vector5FromJson(const QJsonValue &value)
+{
+    Vector5 result{};
+    const QJsonArray array = value.toArray();
+    for (int index = 0; index < 5 && index < array.size(); ++index)
+        result[index] = array.at(index).toDouble();
+    return result;
+}
+
+Matrix3 matrix3FromJson(const QJsonValue &value)
+{
+    Matrix3 matrix{};
+    const QJsonArray rows = value.toArray();
+    for (int row = 0; row < 3 && row < rows.size(); ++row) {
+        const QJsonArray values = rows.at(row).toArray();
+        for (int col = 0; col < 3 && col < values.size(); ++col)
+            matrix[row][col] = values.at(col).toDouble();
+    }
+    return matrix;
+}
+
 Matrix4 matrixFromJson(const QJsonValue &value)
 {
     Matrix4 matrix{};
@@ -89,7 +124,12 @@ QJsonObject sampleToJson(const PoseSample &sample)
             {QStringLiteral("target_translation_m"), vectorToJson(sample.targetTranslation)},
             {QStringLiteral("rotation_residual_deg"), sample.rotationResidualDeg},
             {QStringLiteral("translation_residual_m"), sample.translationResidualM},
-            {QStringLiteral("outlier"), sample.outlier}};
+            {QStringLiteral("outlier"), sample.outlier},
+            {QStringLiteral("image_path"), sample.imagePath},
+            {QStringLiteral("image_status"), imageSampleStatusName(sample.imageStatus)},
+            {QStringLiteral("detected_corner_count"), sample.detectedCornerCount},
+            {QStringLiteral("pnp_reprojection_rmse_px"), sample.pnpReprojectionRmsePx},
+            {QStringLiteral("image_message"), sample.imageMessage}};
 }
 
 PoseSample sampleFromJson(const QJsonObject &object)
@@ -104,6 +144,11 @@ PoseSample sampleFromJson(const QJsonObject &object)
     sample.rotationResidualDeg = object.value(QStringLiteral("rotation_residual_deg")).toDouble();
     sample.translationResidualM = object.value(QStringLiteral("translation_residual_m")).toDouble();
     sample.outlier = object.value(QStringLiteral("outlier")).toBool();
+    sample.imagePath = object.value(QStringLiteral("image_path")).toString();
+    sample.detectedCornerCount = object.value(QStringLiteral("detected_corner_count")).toInt();
+    sample.pnpReprojectionRmsePx = object.value(QStringLiteral("pnp_reprojection_rmse_px")).toDouble();
+    sample.imageMessage = object.value(QStringLiteral("image_message")).toString();
+    sample.imageStatus = imageSampleStatusFromName(object.value(QStringLiteral("image_status")).toString());
     return sample;
 }
 
@@ -144,6 +189,111 @@ QJsonObject resultToJson(const CalibrationResult &result)
             {QStringLiteral("message"), result.message},
             {QStringLiteral("training_report"), reportToJson(result.trainingReport)},
             {QStringLiteral("validation_report"), reportToJson(result.validationReport)}};
+}
+
+QJsonObject intrinsicsToJson(const CameraIntrinsics &intrinsics)
+{
+    return {{QStringLiteral("valid"), intrinsics.valid},
+            {QStringLiteral("camera_matrix"), matrix3ToJson(intrinsics.cameraMatrix)},
+            {QStringLiteral("distortion_coeffs"), vector5ToJson(intrinsics.distortionCoeffs)},
+            {QStringLiteral("image_width"), intrinsics.imageWidth},
+            {QStringLiteral("image_height"), intrinsics.imageHeight},
+            {QStringLiteral("source"), intrinsics.source},
+            {QStringLiteral("calibrated_at"), intrinsics.calibratedAt.toString(Qt::ISODate)}};
+}
+
+CameraIntrinsics intrinsicsFromJson(const QJsonObject &object)
+{
+    CameraIntrinsics intrinsics;
+    intrinsics.valid = object.value(QStringLiteral("valid")).toBool(false);
+    intrinsics.cameraMatrix = matrix3FromJson(object.value(QStringLiteral("camera_matrix")));
+    intrinsics.distortionCoeffs = vector5FromJson(object.value(QStringLiteral("distortion_coeffs")));
+    intrinsics.imageWidth = object.value(QStringLiteral("image_width")).toInt();
+    intrinsics.imageHeight = object.value(QStringLiteral("image_height")).toInt();
+    intrinsics.source = object.value(QStringLiteral("source")).toString();
+    intrinsics.calibratedAt = QDateTime::fromString(object.value(QStringLiteral("calibrated_at")).toString(), Qt::ISODate);
+    return intrinsics;
+}
+
+QJsonObject cameraSampleToJson(const CameraCalibrationSample &sample)
+{
+    return {{QStringLiteral("image_path"), sample.imagePath},
+            {QStringLiteral("image_width"), sample.imageWidth},
+            {QStringLiteral("image_height"), sample.imageHeight},
+            {QStringLiteral("detected_corner_count"), sample.detectedCornerCount},
+            {QStringLiteral("reprojection_rmse_px"), sample.reprojectionRmsePx},
+            {QStringLiteral("used"), sample.used},
+            {QStringLiteral("outlier"), sample.outlier},
+            {QStringLiteral("status"), cameraCalibrationSampleStatusName(sample.status)},
+            {QStringLiteral("message"), sample.message}};
+}
+
+CameraCalibrationSample cameraSampleFromJson(const QJsonObject &object)
+{
+    CameraCalibrationSample sample;
+    sample.imagePath = object.value(QStringLiteral("image_path")).toString();
+    sample.imageWidth = object.value(QStringLiteral("image_width")).toInt();
+    sample.imageHeight = object.value(QStringLiteral("image_height")).toInt();
+    sample.detectedCornerCount = object.value(QStringLiteral("detected_corner_count")).toInt();
+    sample.reprojectionRmsePx = object.value(QStringLiteral("reprojection_rmse_px")).toDouble();
+    sample.used = object.value(QStringLiteral("used")).toBool();
+    sample.outlier = object.value(QStringLiteral("outlier")).toBool();
+    sample.status = cameraCalibrationSampleStatusFromName(object.value(QStringLiteral("status")).toString());
+    sample.message = object.value(QStringLiteral("message")).toString();
+    return sample;
+}
+
+QJsonObject cameraReportToJson(const CameraCalibrationReport &report)
+{
+    QJsonArray samples;
+    for (const CameraCalibrationSample &sample : report.samples) samples.append(cameraSampleToJson(sample));
+    return {{QStringLiteral("available"), report.available},
+            {QStringLiteral("success"), report.success},
+            {QStringLiteral("passed"), report.passed},
+            {QStringLiteral("initial_image_count"), report.initialImageCount},
+            {QStringLiteral("initial_detected_count"), report.initialDetectedCount},
+            {QStringLiteral("final_used_count"), report.finalUsedCount},
+            {QStringLiteral("outlier_count"), report.outlierCount},
+            {QStringLiteral("image_width"), report.imageWidth},
+            {QStringLiteral("image_height"), report.imageHeight},
+            {QStringLiteral("outlier_threshold_px"), report.outlierThresholdPx},
+            {QStringLiteral("rms_px"), report.rmsPx},
+            {QStringLiteral("mean_rmse_px"), report.meanRmsePx},
+            {QStringLiteral("max_rmse_px"), report.maxRmsePx},
+            {QStringLiteral("coverage_warning"), report.coverageWarning},
+            {QStringLiteral("errors"), QJsonArray::fromStringList(report.errors)},
+            {QStringLiteral("warnings"), QJsonArray::fromStringList(report.warnings)},
+            {QStringLiteral("message"), report.message},
+            {QStringLiteral("calibrated_at"), report.calibratedAt.toString(Qt::ISODate)},
+            {QStringLiteral("intrinsics"), intrinsicsToJson(report.intrinsics)},
+            {QStringLiteral("samples"), samples}};
+}
+
+CameraCalibrationReport cameraReportFromJson(const QJsonObject &object)
+{
+    CameraCalibrationReport report;
+    report.available = object.value(QStringLiteral("available")).toBool();
+    report.success = object.value(QStringLiteral("success")).toBool();
+    report.passed = object.value(QStringLiteral("passed")).toBool();
+    report.initialImageCount = object.value(QStringLiteral("initial_image_count")).toInt();
+    report.initialDetectedCount = object.value(QStringLiteral("initial_detected_count")).toInt();
+    report.finalUsedCount = object.value(QStringLiteral("final_used_count")).toInt();
+    report.outlierCount = object.value(QStringLiteral("outlier_count")).toInt();
+    report.imageWidth = object.value(QStringLiteral("image_width")).toInt();
+    report.imageHeight = object.value(QStringLiteral("image_height")).toInt();
+    report.outlierThresholdPx = object.value(QStringLiteral("outlier_threshold_px")).toDouble(1.0);
+    report.rmsPx = object.value(QStringLiteral("rms_px")).toDouble();
+    report.meanRmsePx = object.value(QStringLiteral("mean_rmse_px")).toDouble();
+    report.maxRmsePx = object.value(QStringLiteral("max_rmse_px")).toDouble();
+    report.coverageWarning = object.value(QStringLiteral("coverage_warning")).toBool();
+    for (const QJsonValue &value : object.value(QStringLiteral("errors")).toArray()) report.errors.append(value.toString());
+    for (const QJsonValue &value : object.value(QStringLiteral("warnings")).toArray()) report.warnings.append(value.toString());
+    report.message = object.value(QStringLiteral("message")).toString();
+    report.calibratedAt = QDateTime::fromString(object.value(QStringLiteral("calibrated_at")).toString(), Qt::ISODate);
+    report.intrinsics = intrinsicsFromJson(object.value(QStringLiteral("intrinsics")).toObject());
+    for (const QJsonValue &value : object.value(QStringLiteral("samples")).toArray())
+        report.samples.append(cameraSampleFromJson(value.toObject()));
+    return report;
 }
 
 QString vectorText(const Vector3 &value)
@@ -237,6 +387,7 @@ IoResult readCsv(const QString &filePath, CalibrationDataset *dataset, const Pos
         samples.append(sample);
     }
     dataset->samples = samples;
+    dataset->targetPosesReady = true;
     dataset->inputSpec = inputSpec;
     dataset->results.clear();
     return {true, {}};
@@ -263,9 +414,22 @@ IoResult writeJson(const QString &filePath, const CalibrationDataset &dataset)
         {QStringLiteral("direction_result"), directionName(PoseDirection::CameraToGripper)},
         {QStringLiteral("robot"), dataset.robotName}, {QStringLiteral("camera"), dataset.cameraName},
         {QStringLiteral("notes"), dataset.notes},
+        {QStringLiteral("board_pattern"), boardPatternName(dataset.boardSpec.pattern)},
+        {QStringLiteral("board_inner_corners_x"), dataset.boardSpec.innerCornersX},
+        {QStringLiteral("board_inner_corners_y"), dataset.boardSpec.innerCornersY},
+        {QStringLiteral("board_square_size_m"), dataset.boardSpec.squareSizeM},
+        {QStringLiteral("camera_intrinsics_valid"), dataset.cameraIntrinsics.valid},
+        {QStringLiteral("camera_matrix"), matrix3ToJson(dataset.cameraIntrinsics.cameraMatrix)},
+        {QStringLiteral("distortion_coeffs"), vector5ToJson(dataset.cameraIntrinsics.distortionCoeffs)},
+        {QStringLiteral("camera_image_width"), dataset.cameraIntrinsics.imageWidth},
+        {QStringLiteral("camera_image_height"), dataset.cameraIntrinsics.imageHeight},
+        {QStringLiteral("intrinsics_source"), dataset.cameraIntrinsics.source},
+        {QStringLiteral("intrinsics_calibrated_at"), dataset.cameraIntrinsics.calibratedAt.toString(Qt::ISODate)},
+        {QStringLiteral("camera_calibration_report"), cameraReportToJson(dataset.cameraCalibrationReport)},
         {QStringLiteral("pass_rotation_rmse_deg"), dataset.passRotationRmseDeg},
         {QStringLiteral("pass_translation_rmse_m"), dataset.passTranslationRmseM},
         {QStringLiteral("created_at"), dataset.createdAt.toString(Qt::ISODate)},
+        {QStringLiteral("target_poses_ready"), dataset.targetPosesReady},
         {QStringLiteral("samples"), samples}, {QStringLiteral("validation_samples"), validationSamples},
         {QStringLiteral("results"), results}};
     file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -292,6 +456,22 @@ IoResult readJson(const QString &filePath, CalibrationDataset *dataset)
     parsed.robotName = root.value(QStringLiteral("robot")).toString(parsed.robotName);
     parsed.cameraName = root.value(QStringLiteral("camera")).toString(parsed.cameraName);
     parsed.notes = root.value(QStringLiteral("notes")).toString();
+    parsed.boardSpec.innerCornersX = root.value(QStringLiteral("board_inner_corners_x"))
+                                         .toInt(parsed.boardSpec.innerCornersX);
+    parsed.boardSpec.innerCornersY = root.value(QStringLiteral("board_inner_corners_y"))
+                                         .toInt(parsed.boardSpec.innerCornersY);
+    parsed.boardSpec.squareSizeM = root.value(QStringLiteral("board_square_size_m"))
+                                       .toDouble(parsed.boardSpec.squareSizeM);
+    parsed.cameraIntrinsics.valid = root.value(QStringLiteral("camera_intrinsics_valid")).toBool(false);
+    parsed.cameraIntrinsics.cameraMatrix = matrix3FromJson(root.value(QStringLiteral("camera_matrix")));
+    parsed.cameraIntrinsics.distortionCoeffs = vector5FromJson(root.value(QStringLiteral("distortion_coeffs")));
+    parsed.cameraIntrinsics.imageWidth = root.value(QStringLiteral("camera_image_width")).toInt();
+    parsed.cameraIntrinsics.imageHeight = root.value(QStringLiteral("camera_image_height")).toInt();
+    parsed.cameraIntrinsics.source = root.value(QStringLiteral("intrinsics_source")).toString();
+    parsed.cameraIntrinsics.calibratedAt = QDateTime::fromString(
+        root.value(QStringLiteral("intrinsics_calibrated_at")).toString(), Qt::ISODate);
+    parsed.cameraCalibrationReport = cameraReportFromJson(
+        root.value(QStringLiteral("camera_calibration_report")).toObject());
     parsed.passRotationRmseDeg = root.value(QStringLiteral("pass_rotation_rmse_deg")).toDouble(parsed.passRotationRmseDeg);
     parsed.passTranslationRmseM = root.value(QStringLiteral("pass_translation_rmse_m")).toDouble(parsed.passTranslationRmseM);
     parsed.createdAt = QDateTime::fromString(root.value(QStringLiteral("created_at")).toString(), Qt::ISODate);
@@ -299,6 +479,8 @@ IoResult readJson(const QString &filePath, CalibrationDataset *dataset)
         parsed.samples.append(sampleFromJson(value.toObject()));
     for (const QJsonValue &value : root.value(QStringLiteral("validation_samples")).toArray())
         parsed.validationSamples.append(sampleFromJson(value.toObject()));
+    parsed.targetPosesReady = !parsed.samples.isEmpty()
+                              && root.value(QStringLiteral("target_poses_ready")).toBool(true);
     *dataset = parsed;
     return {true, {}};
 }
@@ -314,6 +496,32 @@ IoResult writeYaml(const QString &filePath, const CalibrationDataset &dataset)
            << "angle_unit: " << angleUnitName(dataset.inputSpec.angleUnit) << "\nlength_unit: "
            << lengthUnitName(dataset.inputSpec.lengthUnit) << "\ncreated_at: \""
            << dataset.createdAt.toString(Qt::ISODate) << "\"\n"
+           << "camera_intrinsics_valid: " << (dataset.cameraIntrinsics.valid ? "true" : "false") << "\n"
+           << "camera_image_width: " << dataset.cameraIntrinsics.imageWidth << "\n"
+           << "camera_image_height: " << dataset.cameraIntrinsics.imageHeight << "\n"
+           << "intrinsics_source: \"" << dataset.cameraIntrinsics.source << "\"\n"
+           << "intrinsics_calibrated_at: \"" << dataset.cameraIntrinsics.calibratedAt.toString(Qt::ISODate)
+           << "\"\ncamera_matrix:\n";
+    for (const auto &row : dataset.cameraIntrinsics.cameraMatrix)
+        stream << "  - [" << row[0] << ", " << row[1] << ", " << row[2] << "]\n";
+    stream << "distortion_coeffs: [";
+    for (int index = 0; index < 5; ++index) {
+        if (index > 0) stream << ", ";
+        stream << dataset.cameraIntrinsics.distortionCoeffs[index];
+    }
+    stream << "]\ncamera_calibration:\n"
+           << "  available: " << (dataset.cameraCalibrationReport.available ? "true" : "false") << "\n"
+           << "  success: " << (dataset.cameraCalibrationReport.success ? "true" : "false") << "\n"
+           << "  passed: " << (dataset.cameraCalibrationReport.passed ? "true" : "false") << "\n"
+           << "  initial_image_count: " << dataset.cameraCalibrationReport.initialImageCount << "\n"
+           << "  final_used_count: " << dataset.cameraCalibrationReport.finalUsedCount << "\n"
+           << "  outlier_count: " << dataset.cameraCalibrationReport.outlierCount << "\n"
+           << "  rms_px: " << dataset.cameraCalibrationReport.rmsPx << "\n"
+           << "  mean_rmse_px: " << dataset.cameraCalibrationReport.meanRmsePx << "\n"
+           << "  max_rmse_px: " << dataset.cameraCalibrationReport.maxRmsePx << "\n"
+           << "  coverage_warning: " << (dataset.cameraCalibrationReport.coverageWarning ? "true" : "false") << "\n"
+           << "  calibrated_at: \"" << dataset.cameraCalibrationReport.calibratedAt.toString(Qt::ISODate)
+           << "\"\n"
            << "pass_rotation_rmse_deg: " << dataset.passRotationRmseDeg << "\n"
            << "pass_translation_rmse_m: " << dataset.passTranslationRmseM << "\nresults:\n";
     for (const CalibrationResult &result : dataset.results) {

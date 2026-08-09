@@ -1,23 +1,40 @@
 #include "mainwindow.h"
 
+#include "core/board_pose_estimator.h"
+#include "core/camera_calibration_service.h"
 #include "core/calibration_service.h"
 #include "core/dataset_validator.h"
 #include "core/pose_conversion.h"
 #include "core/synthetic_dataset.h"
+#include "controllers/calibration_controller.h"
 #include "io/dataset_io.h"
+#include "io/image_sample_io.h"
+#include "views/calibration_result_page.h"
+#include "views/camera_calibration_page.h"
+#include "views/current_data_page.h"
+#include "views/manual_pose_page.h"
 
 #include <QApplication>
 #include <QDebug>
 #include <QFile>
 #include <QTextStream>
 #include <QTemporaryDir>
+#include <QPushButton>
+#include <QPlainTextEdit>
+#include <QTableView>
+#include <QTableWidget>
+#include <QTabWidget>
 #include <QLocale>
 #include <QTranslator>
 
 #include <opencv2/core.hpp>
+#include <opencv2/calib3d.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 
@@ -30,11 +47,66 @@ double matrixMaxError(const handeye::Matrix4 &left, const handeye::Matrix4 &righ
     return result;
 }
 
+double matrix3MaxError(const handeye::Matrix3 &left, const handeye::Matrix3 &right)
+{
+    double result = 0.0;
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            result = std::max(result, std::abs(left[row][col] - right[row][col]));
+    return result;
+}
+
+QVector<handeye::CameraCalibrationSample> makeSyntheticCameraObservations(
+    const handeye::BoardSpec &board,
+    const handeye::Matrix3 &cameraMatrix,
+    const handeye::Vector5 &distortion,
+    int count)
+{
+    cv::Mat cvCameraMatrix(3, 3, CV_64F);
+    cv::Mat cvDistortion(1, 5, CV_64F);
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            cvCameraMatrix.at<double>(row, col) = cameraMatrix[row][col];
+    for (int index = 0; index < 5; ++index) cvDistortion.at<double>(0, index) = distortion[index];
+
+    std::vector<cv::Point3f> objectPoints;
+    for (int row = 0; row < board.innerCornersY; ++row)
+        for (int col = 0; col < board.innerCornersX; ++col)
+            objectPoints.emplace_back(static_cast<float>(col * board.squareSizeM),
+                                      static_cast<float>(row * board.squareSizeM), 0.0F);
+
+    QVector<handeye::CameraCalibrationSample> samples;
+    for (int index = 0; index < count; ++index) {
+        const cv::Mat rvec = (cv::Mat_<double>(3, 1) << 0.03 * std::sin(index * 0.7),
+                              -0.18 + 0.025 * index, 0.04 * std::cos(index * 0.5));
+        const cv::Mat tvec = (cv::Mat_<double>(3, 1) << -0.11 + 0.018 * index,
+                              -0.05 + 0.022 * (index % 5), 0.75 + 0.035 * (index % 4));
+        std::vector<cv::Point2f> projected;
+        cv::projectPoints(objectPoints, rvec, tvec, cvCameraMatrix, cvDistortion, projected);
+
+        handeye::CameraCalibrationSample sample;
+        sample.imagePath = QStringLiteral("synthetic_camera_%1.png").arg(index + 1);
+        sample.imageWidth = 640;
+        sample.imageHeight = 480;
+        sample.status = handeye::CameraCalibrationSampleStatus::Valid;
+        sample.used = true;
+        for (const cv::Point2f &point : projected) sample.corners.append({point.x, point.y});
+        sample.detectedCornerCount = sample.corners.size();
+        samples.append(sample);
+    }
+    return samples;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
+
+    QFile styleFile(QStringLiteral(":/assets/style.qss"));
+    if (styleFile.open(QIODevice::ReadOnly | QIODevice::Text))
+        app.setStyleSheet(QString::fromUtf8(styleFile.readAll()));
+
     QTranslator translator;
     if (translator.load(QLocale::system(), QStringLiteral("hand_eye_calibration"), QStringLiteral("_"),
                        QStringLiteral(":/i18n")))
@@ -86,13 +158,133 @@ int main(int argc, char *argv[])
             sample.gripperRotation = {0.0, 0.0, 0.0};
         const bool degeneracyOk = !handeye::validateDataset(degenerateDataset).valid;
 
+        handeye::CalibrationController manualController;
+        handeye::PoseInputSpec manualSpec;
+        QVector<handeye::ManualPoseInput> manualInputs;
+        for (const handeye::PoseSample &sample : dataset.samples) {
+            handeye::ManualPoseInput input;
+            input.id = sample.id;
+            input.tcpRotation = {sample.gripperRotation[0], sample.gripperRotation[1],
+                                 sample.gripperRotation[2], 0.0};
+            input.tcpTranslation = sample.gripperTranslation;
+            input.cameraRotation = {sample.targetRotation[0], sample.targetRotation[1],
+                                    sample.targetRotation[2], 0.0};
+            input.cameraTranslation = sample.targetTranslation;
+            manualInputs.append(input);
+        }
+        const bool manualApplyOk = manualController.applyManualPoseInputs(manualInputs, manualSpec)
+                                   && manualController.dataset().targetPosesReady
+                                   && manualController.dataset().samples.size() == dataset.samples.size()
+                                   && manualController.dataset().samples.first().imageStatus
+                                          == handeye::ImageSampleStatus::ManualPose;
+        auto duplicateManualInputs = manualInputs;
+        duplicateManualInputs.last().id = duplicateManualInputs.first().id;
+        const bool manualDuplicateRejected = !manualController.applyManualPoseInputs(duplicateManualInputs,
+                                                                                       manualSpec);
+        handeye::PoseInputSpec quaternionSpec;
+        quaternionSpec.rotationFormat = handeye::RotationFormat::QuaternionWXYZ;
+        quaternionSpec.angleUnit = handeye::AngleUnit::Degrees;
+        quaternionSpec.lengthUnit = handeye::LengthUnit::Millimeters;
+        const auto quaternionNormalized = handeye::pose::normalize(
+            {std::sqrt(0.5), 0.0, 0.0, std::sqrt(0.5)}, {1000.0, 0.0, 0.0}, quaternionSpec);
+        const bool manualQuaternionOk = quaternionNormalized.success
+                                        && std::abs(quaternionNormalized.rotation[2] - CV_PI / 2.0) < 1e-10
+                                        && std::abs(quaternionNormalized.translation[0] - 1.0) < 1e-10;
+
+        QTemporaryDir imageDir;
+        const int squarePixels = 60;
+        const int marginPixels = 30;
+        const int boardSquaresX = 10;
+        const int boardSquaresY = 7;
+        cv::Mat chessboard(boardSquaresY * squarePixels + marginPixels * 2,
+                           boardSquaresX * squarePixels + marginPixels * 2, CV_8UC1,
+                           cv::Scalar(255));
+        for (int row = 0; row < boardSquaresY; ++row) {
+            for (int col = 0; col < boardSquaresX; ++col) {
+                if ((row + col) % 2 == 0) {
+                    cv::rectangle(chessboard,
+                                  cv::Rect(marginPixels + col * squarePixels,
+                                           marginPixels + row * squarePixels,
+                                           squarePixels, squarePixels),
+                                  cv::Scalar(0), cv::FILLED);
+                }
+            }
+        }
+        const QString chessboardPath = imageDir.filePath(QStringLiteral("board_001.png"));
+        const bool imageWriteOk = !imageDir.path().isEmpty()
+                                  && cv::imwrite(chessboardPath.toLocal8Bit().constData(), chessboard);
+        handeye::BoardSpec boardSpec;
+        handeye::CameraIntrinsics intrinsics;
+        intrinsics.valid = true;
+        intrinsics.cameraMatrix = {{{800.0, 0.0, chessboard.cols / 2.0},
+                                    {0.0, 800.0, chessboard.rows / 2.0},
+                                    {0.0, 0.0, 1.0}}};
+        const auto imagePose = handeye::BoardPoseEstimator::estimateChessboard(chessboardPath,
+                                                                                 boardSpec, intrinsics);
+        const bool imagePoseOk = imageWriteOk && imagePose.success
+                                  && imagePose.detectedCornerCount == boardSpec.innerCornersX * boardSpec.innerCornersY
+                                  && imagePose.reprojectionRmsePx < 1.0;
+
+        const QString pairedCsvPath = imageDir.filePath(QStringLiteral("paired.csv"));
+        QFile pairedFile(pairedCsvPath);
+        pairedFile.open(QIODevice::WriteOnly | QIODevice::Text);
+        QTextStream pairedStream(&pairedFile);
+        pairedStream << "id,image_path,tx,ty,tz,rx,ry,rz\n"
+                     << "1," << chessboardPath << ",0,0,0,0,0,0\n";
+        pairedFile.close();
+        handeye::CalibrationDataset pairedDataset;
+        const auto pairedRead = handeye::readPoseImageCsv(pairedCsvPath, &pairedDataset,
+                                                           handeye::PoseInputSpec{});
+        const bool pairedImportOk = pairedRead.success && pairedDataset.samples.size() == 1
+                                    && pairedDataset.samples.first().imagePath == chessboardPath;
+
+        const handeye::BoardSpec cameraBoard{handeye::BoardPattern::Chessboard, 9, 6, 0.025};
+        const handeye::Matrix3 knownCameraMatrix{{{800.0, 0.0, 320.0},
+                                                   {0.0, 820.0, 240.0},
+                                                   {0.0, 0.0, 1.0}}};
+        const handeye::Vector5 knownDistortion{-0.12, 0.03, 0.001, -0.002, -0.01};
+        const auto cameraObservations = makeSyntheticCameraObservations(cameraBoard, knownCameraMatrix,
+                                                                          knownDistortion, 12);
+        const auto cameraReport = handeye::CameraCalibrationService::calibrateObservations(cameraObservations,
+                                                                                              cameraBoard);
+        const bool cameraCalibrationOk = cameraReport.success
+                                         && cameraReport.finalUsedCount >= 6
+                                         && matrix3MaxError(cameraReport.intrinsics.cameraMatrix, knownCameraMatrix) < 0.5
+                                         && std::abs(cameraReport.intrinsics.distortionCoeffs[0] - knownDistortion[0]) < 0.02;
+        const auto cameraOutlierObservations = [&cameraObservations] {
+            auto result = cameraObservations;
+            for (int index = 0; index < result.last().corners.size(); ++index) {
+                if (index % 2 == 0) {
+                    result.last().corners[index][0] += 18.0;
+                    result.last().corners[index][1] -= 11.0;
+                }
+            }
+            return result;
+        }();
+        const auto cameraOutlierReport = handeye::CameraCalibrationService::calibrateObservations(
+            cameraOutlierObservations, cameraBoard);
+        const bool cameraOutlierOk = cameraOutlierReport.success && cameraOutlierReport.outlierCount > 0
+                                     && cameraOutlierReport.finalUsedCount >= 6;
+        const auto cameraTooFewReport = handeye::CameraCalibrationService::calibrateObservations(
+            cameraObservations.mid(0, 5), cameraBoard);
+        const bool cameraTooFewOk = !cameraTooFewReport.success && !cameraTooFewReport.errors.isEmpty();
+        auto mixedResolutionObservations = cameraObservations;
+        mixedResolutionObservations.last().imageWidth = 800;
+        const auto mixedResolutionReport = handeye::CameraCalibrationService::calibrateObservations(
+            mixedResolutionObservations, cameraBoard);
+        const bool cameraResolutionOk = !mixedResolutionReport.success
+                                        && mixedResolutionReport.errors.join('\n').contains(QStringLiteral("分辨率"));
+
         QTemporaryDir tempDir;
         handeye::CalibrationDataset csvDataset;
         handeye::CalibrationDataset jsonDataset;
         const auto csvWrite = handeye::writeCsv(tempDir.filePath(QStringLiteral("samples.csv")), dataset);
         const auto csvRead = handeye::readCsv(tempDir.filePath(QStringLiteral("samples.csv")), &csvDataset,
                                               handeye::PoseInputSpec{});
-        const auto jsonWrite = handeye::writeJson(tempDir.filePath(QStringLiteral("samples.json")), dataset);
+        handeye::CalibrationDataset jsonSource = dataset;
+        jsonSource.cameraIntrinsics = cameraReport.intrinsics;
+        jsonSource.cameraCalibrationReport = cameraReport;
+        const auto jsonWrite = handeye::writeJson(tempDir.filePath(QStringLiteral("samples.json")), jsonSource);
         const auto jsonRead = handeye::readJson(tempDir.filePath(QStringLiteral("samples.json")), &jsonDataset);
         const auto yamlWrite = handeye::writeYaml(tempDir.filePath(QStringLiteral("result.yaml")), dataset);
         const auto txtWrite = results.isEmpty() ? handeye::IoResult{false, {}}
@@ -105,17 +297,84 @@ int main(int argc, char *argv[])
                           && yamlWrite.success && txtWrite.success && cppWrite.success && pythonWrite.success
                           && csvDataset.samples.size() == dataset.samples.size()
                           && jsonDataset.samples.size() == dataset.samples.size();
+        const bool cameraJsonOk = jsonDataset.cameraIntrinsics.valid
+                                  && matrix3MaxError(jsonDataset.cameraIntrinsics.cameraMatrix,
+                                                     cameraReport.intrinsics.cameraMatrix) < 1e-12
+                                  && jsonDataset.cameraIntrinsics.distortionCoeffs == cameraReport.intrinsics.distortionCoeffs
+                                  && jsonDataset.cameraCalibrationReport.success;
+
+        handeye::MainWindow smokeWindow;
+        const auto *tabs = smokeWindow.findChild<QTabWidget *>(QStringLiteral("mainTabs"));
+        const QStringList expectedTabs = {QStringLiteral("首页"), QStringLiteral("采集"), QStringLiteral("参数"),
+                                          QStringLiteral("相机内参"), QStringLiteral("手动输入"),
+                                          QStringLiteral("当前数据"), QStringLiteral("标定结果")};
+        bool uiTabsOk = tabs && tabs->count() == expectedTabs.size();
+        if (uiTabsOk) {
+            for (int index = 0; index < expectedTabs.size(); ++index)
+                uiTabsOk = uiTabsOk && tabs->tabText(index) == expectedTabs.at(index);
+        }
+        const auto buttons = smokeWindow.findChildren<QPushButton *>();
+        const auto hasButton = [&buttons](const QString &text) {
+            return std::any_of(buttons.cbegin(), buttons.cend(), [&text](const QPushButton *button) {
+                return button->text() == text;
+            });
+        };
+        const bool uiActionsOk = hasButton(QStringLiteral("上传机器人坐标"))
+                                 && hasButton(QStringLiteral("上传标定板图片"))
+                                 && hasButton(QStringLiteral("开始相机标定"))
+                                 && hasButton(QStringLiteral("应用到当前标定数据"))
+                                 && hasButton(QStringLiteral("应用并计算五种算法"))
+                                 && hasButton(QStringLiteral("五种算法自动比较并推荐"));
+        auto *cameraPage = smokeWindow.findChild<handeye::CameraCalibrationPage *>();
+        if (cameraPage) {
+            cameraPage->setBoardSpec(cameraBoard);
+            cameraPage->setReport(cameraReport);
+        }
+        const auto *cameraTable = smokeWindow.findChild<QTableWidget *>(QStringLiteral("cameraCalibrationTable"));
+        const bool uiCameraPageOk = cameraPage && cameraTable && cameraTable->rowCount() == cameraReport.samples.size();
+        auto *manualPage = smokeWindow.findChild<handeye::ManualPosePage *>();
+        const auto *manualTable = smokeWindow.findChild<QTableWidget *>(QStringLiteral("manualPoseTable"));
+        const bool uiManualPageOk = manualPage && manualTable;
+        auto *currentDataPage = smokeWindow.findChild<handeye::CurrentDataPage *>();
+        if (currentDataPage) currentDataPage->setSamples(dataset.samples);
+        const auto *currentDataTable = smokeWindow.findChild<QTableView *>(QStringLiteral("currentDataTable"));
+        const bool uiDataOk = currentDataPage && currentDataTable && currentDataTable->model()
+                              && currentDataTable->model()->rowCount() == dataset.samples.size();
+        auto *resultPage = smokeWindow.findChild<handeye::CalibrationResultPage *>();
+        if (resultPage) resultPage->setResults(results);
+        const auto *resultMatrix = smokeWindow.findChild<QPlainTextEdit *>(QStringLiteral("resultMatrix"));
+        const bool uiResultOk = resultPage && resultMatrix
+                                && resultMatrix->toPlainText().contains(QStringLiteral("camera→gripper"));
+        const bool uiSmokeOk = uiTabsOk && uiActionsOk && uiCameraPageOk && uiManualPageOk
+                               && uiDataOk && uiResultOk;
 
         const bool allOk = successCount == handeye::allMethods().size()
                            && recommendedCount == 1
                            && maxTruthError < 1e-5
                            && normalizationOk && independentValidationOk
-                           && outlierDetectionOk && degeneracyOk && ioOk;
+                           && outlierDetectionOk && degeneracyOk && ioOk
+                           && imagePoseOk && pairedImportOk && cameraCalibrationOk && cameraOutlierOk
+                           && cameraTooFewOk && cameraResolutionOk && cameraJsonOk
+                           && manualApplyOk && manualDuplicateRejected && manualQuaternionOk && uiSmokeOk;
         smokeStream << "success=" << successCount << "/" << handeye::allMethods().size() << Qt::endl;
         smokeStream << "recommended=" << recommendedCount << ",truth_max_error=" << maxTruthError << Qt::endl;
         smokeStream << "normalization=" << normalizationOk << ",independent_validation=" << independentValidationOk
                     << ",outlier_detection=" << outlierDetectionOk << ",degeneracy=" << degeneracyOk << Qt::endl;
         smokeStream << "io_roundtrip_and_exports=" << ioOk << Qt::endl;
+        smokeStream << "image_pose_estimation=" << imagePoseOk
+                    << ",paired_import=" << pairedImportOk << Qt::endl;
+        smokeStream << "camera_calibration=" << cameraCalibrationOk
+                    << ",camera_outlier=" << cameraOutlierOk
+                    << ",camera_too_few=" << cameraTooFewOk
+                    << ",camera_resolution=" << cameraResolutionOk
+                    << ",camera_json=" << cameraJsonOk << Qt::endl;
+        smokeStream << "manual_apply=" << manualApplyOk
+                    << ",manual_duplicate_rejected=" << manualDuplicateRejected
+                    << ",manual_quaternion=" << manualQuaternionOk << Qt::endl;
+        smokeStream << "ui_tabs=" << uiTabsOk << ",ui_actions=" << uiActionsOk
+                    << ",ui_camera_page=" << uiCameraPageOk
+                    << ",ui_manual_page=" << uiManualPageOk
+                    << ",ui_data_table=" << uiDataOk << ",ui_result_matrix=" << uiResultOk << Qt::endl;
         qInfo() << "smoke-test" << allOk;
         return allOk ? 0 : 1;
     }

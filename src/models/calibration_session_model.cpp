@@ -1,6 +1,7 @@
 #include "models/calibration_session_model.h"
 
 #include <QBrush>
+#include <QColor>
 #include <QLocale>
 
 namespace handeye {
@@ -14,7 +15,7 @@ int SampleTableModel::rowCount(const QModelIndex &parent) const
 
 int SampleTableModel::columnCount(const QModelIndex &parent) const
 {
-    return parent.isValid() ? 0 : 17;
+    return parent.isValid() ? 0 : 21;
 }
 
 QVariant SampleTableModel::data(const QModelIndex &index, int role) const
@@ -23,7 +24,9 @@ QVariant SampleTableModel::data(const QModelIndex &index, int role) const
         return {};
     const PoseSample &sample = m_samples.at(index.row());
     if (role == Qt::ForegroundRole && sample.outlier)
-        return QBrush(Qt::red);
+        return QBrush(QColor("#E8463A"));
+    if (role == Qt::BackgroundRole && sample.outlier)
+        return QBrush(QColor("#FCEBEA"));
     if (role != Qt::DisplayRole)
         return {};
     if (index.column() == 0) return sample.id;
@@ -35,6 +38,10 @@ QVariant SampleTableModel::data(const QModelIndex &index, int role) const
         return QLocale().toString(values[valueIndex / 3][valueIndex % 3], 'f', 6);
     if (index.column() == 14) return QLocale().toString(sample.rotationResidualDeg, 'f', 5);
     if (index.column() == 15) return QLocale().toString(sample.translationResidualM, 'f', 7);
+    if (index.column() == 17) return sample.imagePath;
+    if (index.column() == 18) return imageSampleStatusName(sample.imageStatus);
+    if (index.column() == 19) return sample.detectedCornerCount;
+    if (index.column() == 20) return QLocale().toString(sample.pnpReprojectionRmsePx, 'f', 3);
     if (index.column() == 16) return sample.outlier ? QStringLiteral("异常") : QStringLiteral("正常");
     return {};
 }
@@ -49,6 +56,10 @@ QVariant SampleTableModel::headerData(int section, Qt::Orientation orientation, 
         QStringLiteral("T Rx"), QStringLiteral("T Ry"), QStringLiteral("T Rz"),
         QStringLiteral("T Tx"), QStringLiteral("T Ty"), QStringLiteral("T Tz"),
         QStringLiteral("旋转残差(°)"), QStringLiteral("平移残差(m)"), QStringLiteral("样本状态")};
+    if (section == 17) return QStringLiteral("图片路径");
+    if (section == 18) return QStringLiteral("图片状态");
+    if (section == 19) return QStringLiteral("角点数");
+    if (section == 20) return QStringLiteral("PnP RMSE(px)");
     return headers.value(section);
 }
 
@@ -81,8 +92,12 @@ QVariant ResultTableModel::data(const QModelIndex &index, int role) const
     if (!index.isValid() || index.row() >= m_results.size()) return {};
     const CalibrationResult &result = m_results.at(index.row());
     if (role == Qt::ForegroundRole) {
-        if (result.recommended) return QBrush(Qt::darkGreen);
-        if (!result.trainingReport.passed) return QBrush(Qt::darkRed);
+        if (result.recommended) return QBrush(QColor("#15A877"));
+        if (!result.trainingReport.passed) return QBrush(QColor("#E8463A"));
+    }
+    if (role == Qt::BackgroundRole) {
+        if (result.recommended) return QBrush(QColor("#E8F6F1"));
+        if (!result.trainingReport.passed && result.success) return QBrush(QColor("#FCEBEA"));
     }
     if (role != Qt::DisplayRole) return {};
     switch (index.column()) {

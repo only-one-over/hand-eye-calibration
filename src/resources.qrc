@@ -1,0 +1,11 @@
+<RCC>
+    <qresource prefix="/">
+        <file>assets/style.qss</file>
+        <file>assets/icons/Play.svg</file>
+        <file>assets/icons/import.svg</file>
+        <file>assets/icons/download.svg</file>
+        <file>assets/icons/Delete.svg</file>
+        <file>assets/icons/add.svg</file>
+        <file>assets/icons/Refresh.svg</file>
+    </qresource>
+</RCC>

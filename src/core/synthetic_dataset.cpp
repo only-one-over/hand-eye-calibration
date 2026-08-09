@@ -9,6 +9,7 @@ namespace handeye {
 CalibrationDataset makeSyntheticDataset(int count)
 {
     CalibrationDataset dataset;
+    dataset.targetPosesReady = true;
     const Vector3 cameraRotation{0.18, -0.22, 0.12};
     const Vector3 cameraTranslation{0.08, -0.04, 0.16};
     const cv::Matx44d cameraToGripper = matrix::fromRodrigues(cameraRotation, cameraTranslation);

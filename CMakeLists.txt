@@ -14,7 +14,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent LinguistTools)
 # Windows package in that directory is not compatible with the installed
 # MSVC toolchain; the actual vc16 package is under x64/vc16/lib.
 set(HAND_EYE_OPENCV_DIR "" CACHE PATH "OpenCVConfig.cmake directory")
-find_package(OpenCV CONFIG QUIET COMPONENTS core calib3d)
+find_package(OpenCV CONFIG QUIET COMPONENTS core imgproc imgcodecs calib3d)
 if(NOT OpenCV_FOUND)
     set(_hand_eye_opencv_fallback "")
     if(HAND_EYE_OPENCV_DIR AND EXISTS "${HAND_EYE_OPENCV_DIR}/OpenCVConfig.cmake")
@@ -26,7 +26,7 @@ if(NOT OpenCV_FOUND)
     if(_hand_eye_opencv_fallback)
         unset(OpenCV_DIR CACHE)
         set(OpenCV_DIR "${_hand_eye_opencv_fallback}" CACHE PATH "OpenCVConfig.cmake directory" FORCE)
-        find_package(OpenCV CONFIG REQUIRED COMPONENTS core calib3d)
+        find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d)
     else()
         message(FATAL_ERROR
             "OpenCV was not found or its package is incompatible. "
@@ -37,15 +37,37 @@ endif()
 
 qt_standard_project_setup(I18N_TRANSLATED_LANGUAGES zh_CN)
 
-set(TS_FILES hand_eye_calibration_zh_CN.ts)
+set(TS_FILES translations/hand_eye_calibration_zh_CN.ts)
 
 set(PROJECT_SOURCES
     src/main.cpp
     src/mainwindow.cpp
     src/mainwindow.h
+    src/views/sample_batch_window.cpp
+    src/views/sample_batch_window.h
+    src/views/home_page.cpp
+    src/views/home_page.h
+    src/views/capture_page.cpp
+    src/views/capture_page.h
+    src/views/parameters_page.cpp
+    src/views/parameters_page.h
+    src/views/camera_calibration_page.cpp
+    src/views/camera_calibration_page.h
+    src/views/manual_pose_page.cpp
+    src/views/manual_pose_page.h
+    src/views/current_data_page.cpp
+    src/views/current_data_page.h
+    src/views/calibration_result_page.cpp
+    src/views/calibration_result_page.h
+    src/controllers/calibration_controller.cpp
+    src/controllers/calibration_controller.h
     src/domain/calibration_types.h
     src/core/matrix_utils.cpp
     src/core/matrix_utils.h
+    src/core/board_pose_estimator.cpp
+    src/core/board_pose_estimator.h
+    src/core/camera_calibration_service.cpp
+    src/core/camera_calibration_service.h
     src/core/pose_conversion.cpp
     src/core/pose_conversion.h
     src/core/dataset_validator.cpp
@@ -56,10 +78,13 @@ set(PROJECT_SOURCES
     src/core/calibration_service.h
     src/io/dataset_io.cpp
     src/io/dataset_io.h
+    src/io/image_sample_io.cpp
+    src/io/image_sample_io.h
     src/io/pose_adapter.cpp
     src/io/pose_adapter.h
     src/models/calibration_session_model.cpp
     src/models/calibration_session_model.h
+    src/resources.qrc
     ${TS_FILES}
 )
 
