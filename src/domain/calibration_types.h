@@ -28,6 +28,7 @@ enum class PoseAdapterKind { Generic, UniversalRobots, Kuka, Fanuc };
 enum class BoardPattern { Chessboard, Charuco, ArucoGrid };
 enum class ChessboardDetector { Auto, Classic, SB };
 enum class PnpMethod { Auto, Iterative, IPPE };
+enum class PipelineStageState { NotRun, Passed, Warning, Failed, Skipped };
 enum class ImageSampleStatus {
     NotProcessed,
     ImageMissing,
@@ -236,6 +237,68 @@ struct NonlinearOptimizationReport {
     QString message;
 };
 
+struct PnpQualityReport {
+    bool available = false;
+    bool passed = false;
+    int totalImageSamples = 0;
+    int validSamples = 0;
+    int outlierCount = 0;
+    double meanRmsePx = 0.0;
+    double maxRmsePx = 0.0;
+    double thresholdPx = 3.0;
+    QStringList warnings;
+};
+
+struct BootstrapReport {
+    bool available = false;
+    bool success = false;
+    int requestedResamples = 0;
+    int successfulResamples = 0;
+    double confidenceLevel = 0.95;
+    Vector3 rotationStdDeg{};
+    Vector3 translationStdM{};
+    Vector3 rotationLowerDeg{};
+    Vector3 rotationUpperDeg{};
+    Vector3 translationLowerM{};
+    Vector3 translationUpperM{};
+    double rotationNormStdDeg = 0.0;
+    double translationNormStdM = 0.0;
+    double confidenceScore = 0.0;
+    QStringList warnings;
+    QString message;
+};
+
+struct PipelineStageReport {
+    QString name;
+    PipelineStageState state = PipelineStageState::NotRun;
+    QString message;
+};
+
+struct ReliabilityPipelineReport {
+    bool available = false;
+    bool success = false;
+    bool passed = false;
+    int initialSampleCount = 0;
+    int finalSampleCount = 0;
+    int autoRemovedCount = 0;
+    QVector<int> removedSampleIds;
+    QVector<PipelineStageReport> stages;
+    PnpQualityReport pnpReport;
+    ReliabilityReport axXbReport;
+    FixedTargetPoseReport fixedTargetReport;
+    FixedPointReport fixedPointReport;
+    PoseQualityReport qualityReport;
+    NonlinearOptimizationReport optimizationReport;
+    BootstrapReport bootstrapReport;
+    CalibrationMethod finalMethod = CalibrationMethod::Tsai;
+    Matrix4 finalCameraToGripper{};
+    QStringList errors;
+    QStringList warnings;
+    QString message;
+    QDateTime completedAt;
+    qint64 elapsedMs = 0;
+};
+
 // All PoseSample values are canonical: Rodrigues radians and meters.
 struct PoseSample {
     int id = 0;
@@ -277,6 +340,7 @@ struct CalibrationResult {
     FixedPointReport fixedPointReport;
     PoseQualityReport qualityReport;
     NonlinearOptimizationReport optimizationReport;
+    BootstrapReport bootstrapReport;
 };
 
 struct CalibrationDataset {
@@ -298,6 +362,9 @@ struct CalibrationDataset {
     bool hasGroundTruth = false;
     Matrix4 groundTruthCameraToGripper{};
     QVector<CalibrationResult> results;
+    ReliabilityPipelineReport reliabilityPipelineReport;
+    int bootstrapResamples = 200;
+    double bootstrapConfidence = 0.95;
     QDateTime createdAt = QDateTime::currentDateTime();
 };
 
@@ -425,6 +492,27 @@ inline QString pnpMethodName(PnpMethod method)
     return QStringLiteral("Unknown");
 }
 
+inline QString pipelineStageStateName(PipelineStageState state)
+{
+    switch (state) {
+    case PipelineStageState::NotRun: return QStringLiteral("未执行");
+    case PipelineStageState::Passed: return QStringLiteral("通过");
+    case PipelineStageState::Warning: return QStringLiteral("警告");
+    case PipelineStageState::Failed: return QStringLiteral("失败");
+    case PipelineStageState::Skipped: return QStringLiteral("跳过");
+    }
+    return QStringLiteral("未知");
+}
+
+inline PipelineStageState pipelineStageStateFromName(const QString &name)
+{
+    if (name == QStringLiteral("通过")) return PipelineStageState::Passed;
+    if (name == QStringLiteral("警告")) return PipelineStageState::Warning;
+    if (name == QStringLiteral("失败")) return PipelineStageState::Failed;
+    if (name == QStringLiteral("跳过")) return PipelineStageState::Skipped;
+    return PipelineStageState::NotRun;
+}
+
 inline QVector<CalibrationMethod> allMethods()
 {
     return {CalibrationMethod::Tsai, CalibrationMethod::Park, CalibrationMethod::Horaud,
@@ -434,3 +522,4 @@ inline QVector<CalibrationMethod> allMethods()
 } // namespace handeye
 
 Q_DECLARE_METATYPE(handeye::CalibrationResult)
+Q_DECLARE_METATYPE(handeye::ReliabilityPipelineReport)

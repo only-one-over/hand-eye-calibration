@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -42,18 +43,36 @@ CalibrationResultPage::CalibrationResultPage(QWidget *parent) : QWidget(parent)
     auto *optimize = new QPushButton(QStringLiteral("非线性优化精修"), this);
     optimize->setObjectName(QStringLiteral("optimizeRecommendedButton"));
     optimize->setProperty("variant", "primary");
+    auto *pipeline = new QPushButton(QStringLiteral("执行完整可靠性流水线"), this);
+    pipeline->setObjectName(QStringLiteral("runReliabilityPipelineButton"));
+    pipeline->setProperty("variant", "primary");
     auto *importValidation = new QPushButton(QStringLiteral("导入独立验证数据"), this);
     m_referenceSample = new QSpinBox(this);
     m_referenceSample->setObjectName(QStringLiteral("fixedTargetReferenceSample"));
     m_referenceSample->setRange(-1, 999999);
     m_referenceSample->setValue(-1);
     m_referenceSample->setSpecialValueText(QStringLiteral("鲁棒均值"));
+    m_bootstrapResamples = new QSpinBox(this);
+    m_bootstrapResamples->setObjectName(QStringLiteral("bootstrapResamples"));
+    m_bootstrapResamples->setRange(20, 5000);
+    m_bootstrapResamples->setValue(200);
+    m_bootstrapConfidence = new QDoubleSpinBox(this);
+    m_bootstrapConfidence->setObjectName(QStringLiteral("bootstrapConfidence"));
+    m_bootstrapConfidence->setRange(0.50, 0.999);
+    m_bootstrapConfidence->setSingleStep(0.01);
+    m_bootstrapConfidence->setDecimals(3);
+    m_bootstrapConfidence->setValue(0.95);
     actions->addWidget(new QLabel(QStringLiteral("reference ID"), this));
     actions->addWidget(m_referenceSample);
     actions->addWidget(calculateSelected);
     actions->addWidget(calculateAll);
     actions->addWidget(fixedTarget);
     actions->addWidget(optimize);
+    actions->addWidget(pipeline);
+    actions->addWidget(new QLabel(QStringLiteral("Bootstrap 次数"), this));
+    actions->addWidget(m_bootstrapResamples);
+    actions->addWidget(new QLabel(QStringLiteral("置信度"), this));
+    actions->addWidget(m_bootstrapConfidence);
     actions->addWidget(importValidation);
     actions->addStretch();
     layout->addLayout(actions);
@@ -63,6 +82,9 @@ CalibrationResultPage::CalibrationResultPage(QWidget *parent) : QWidget(parent)
         emit computeFixedTargetRequested(m_referenceSample->value());
     });
     connect(optimize, &QPushButton::clicked, this, &CalibrationResultPage::optimizeRequested);
+    connect(pipeline, &QPushButton::clicked, this, [this] {
+        emit reliabilityPipelineRequested(m_bootstrapResamples->value(), m_bootstrapConfidence->value());
+    });
     connect(importValidation, &QPushButton::clicked, this, &CalibrationResultPage::importValidationRequested);
 
     auto *exports = new QHBoxLayout;
@@ -108,6 +130,19 @@ CalibrationResultPage::CalibrationResultPage(QWidget *parent) : QWidget(parent)
     m_poseReportTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_poseReportTable->setMaximumHeight(190);
     layout->addWidget(m_poseReportTable);
+
+    m_pipelineTable = new QTableWidget(this);
+    m_pipelineTable->setObjectName(QStringLiteral("reliabilityPipelineTable"));
+    m_pipelineTable->setColumnCount(3);
+    m_pipelineTable->setHorizontalHeaderLabels({QStringLiteral("流水线阶段"), QStringLiteral("状态"),
+                                                  QStringLiteral("说明")});
+    m_pipelineTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_pipelineTable->setMaximumHeight(220);
+    layout->addWidget(m_pipelineTable);
+    m_uncertainty = new QLabel(QStringLiteral("Bootstrap 置信度将在完整流水线执行后显示。"), this);
+    m_uncertainty->setWordWrap(true);
+    m_uncertainty->setObjectName(QStringLiteral("bootstrapUncertainty"));
+    layout->addWidget(m_uncertainty);
 
     m_log = new QPlainTextEdit(this);
     m_log->setReadOnly(true);
@@ -195,6 +230,14 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
                     .arg(result.optimizationReport.iterations)
                     .arg(result.optimizationReport.converged ? QStringLiteral("已收敛") : QStringLiteral("达到停止条件"));
     }
+    if (result.bootstrapReport.available) {
+        text += QStringLiteral("\nBootstrap：%1/%2 成功，置信度评分 %3/100，旋转不确定度 %4°，平移不确定度 %5 m")
+                    .arg(result.bootstrapReport.successfulResamples)
+                    .arg(result.bootstrapReport.requestedResamples)
+                    .arg(result.bootstrapReport.confidenceScore, 0, 'f', 1)
+                    .arg(result.bootstrapReport.rotationNormStdDeg, 0, 'f', 5)
+                    .arg(result.bootstrapReport.translationNormStdM, 0, 'f', 7);
+    }
     m_poseReportTable->clearContents();
     if (result.fixedTargetReport.available) {
         m_poseReportTable->setHorizontalHeaderLabels({QStringLiteral("样本 ID"), QStringLiteral("预测 X/Y/Z"),
@@ -240,6 +283,54 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
     m_reliability->setText(text);
 }
 
+void CalibrationResultPage::showPipelineReport(const ReliabilityPipelineReport &report)
+{
+    if (!m_pipelineTable || !m_uncertainty) return;
+    m_pipelineTable->clearContents();
+    m_pipelineTable->setRowCount(report.stages.size());
+    for (int row = 0; row < report.stages.size(); ++row) {
+        const PipelineStageReport &stage = report.stages.at(row);
+        m_pipelineTable->setItem(row, 0, new QTableWidgetItem(stage.name));
+        m_pipelineTable->setItem(row, 1, new QTableWidgetItem(pipelineStageStateName(stage.state)));
+        m_pipelineTable->setItem(row, 2, new QTableWidgetItem(stage.message));
+    }
+    m_pipelineTable->resizeColumnsToContents();
+    m_pipelineTable->horizontalHeader()->setStretchLastSection(true);
+    const BootstrapReport &bootstrap = report.bootstrapReport;
+    if (!bootstrap.available) {
+        m_uncertainty->setText(QStringLiteral("Bootstrap 未执行：%1").arg(report.message));
+        return;
+    }
+    m_uncertainty->setText(
+        QStringLiteral("最终矩阵：%1 | 流水线：%2 | 样本 %3 → %4（自动剔除 %5）\n"
+                       "Bootstrap：%6/%7 成功，置信度评分 %8/100\n"
+                       "旋转标准差：[%9, %10, %11]°，95%% 区间：[%12, %13, %14]° ～ [%15, %16, %17]°\n"
+                       "平移标准差：[%18, %19, %20] m，95%% 区间：[%21, %22, %23] m ～ [%24, %25, %26] m")
+            .arg(methodName(report.finalMethod))
+            .arg(report.passed ? QStringLiteral("通过") : QStringLiteral("有警告"))
+            .arg(report.initialSampleCount).arg(report.finalSampleCount).arg(report.autoRemovedCount)
+            .arg(bootstrap.successfulResamples).arg(bootstrap.requestedResamples)
+            .arg(bootstrap.confidenceScore, 0, 'f', 1)
+            .arg(bootstrap.rotationStdDeg[0], 0, 'f', 5)
+            .arg(bootstrap.rotationStdDeg[1], 0, 'f', 5)
+            .arg(bootstrap.rotationStdDeg[2], 0, 'f', 5)
+            .arg(bootstrap.rotationLowerDeg[0], 0, 'f', 5)
+            .arg(bootstrap.rotationLowerDeg[1], 0, 'f', 5)
+            .arg(bootstrap.rotationLowerDeg[2], 0, 'f', 5)
+            .arg(bootstrap.rotationUpperDeg[0], 0, 'f', 5)
+            .arg(bootstrap.rotationUpperDeg[1], 0, 'f', 5)
+            .arg(bootstrap.rotationUpperDeg[2], 0, 'f', 5)
+            .arg(bootstrap.translationStdM[0], 0, 'f', 7)
+            .arg(bootstrap.translationStdM[1], 0, 'f', 7)
+            .arg(bootstrap.translationStdM[2], 0, 'f', 7)
+            .arg(bootstrap.translationLowerM[0], 0, 'f', 7)
+            .arg(bootstrap.translationLowerM[1], 0, 'f', 7)
+            .arg(bootstrap.translationLowerM[2], 0, 'f', 7)
+            .arg(bootstrap.translationUpperM[0], 0, 'f', 7)
+            .arg(bootstrap.translationUpperM[1], 0, 'f', 7)
+            .arg(bootstrap.translationUpperM[2], 0, 'f', 7));
+}
+
 void CalibrationResultPage::showMatrix(const CalibrationResult &result)
 {
     if (!result.success) {
@@ -265,6 +356,8 @@ void CalibrationResultPage::clearResults()
     m_model->setResults({});
     m_reliability->setText(QStringLiteral("尚未生成可靠性报告。"));
     m_matrix->clear();
+    if (m_pipelineTable) m_pipelineTable->setRowCount(0);
+    if (m_uncertainty) m_uncertainty->setText(QStringLiteral("Bootstrap 置信度将在完整流水线执行后显示。"));
 }
 
 void CalibrationResultPage::onResultClicked(const QModelIndex &index)

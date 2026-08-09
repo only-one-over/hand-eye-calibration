@@ -9,6 +9,7 @@
 #include "core/point_calibration_service.h"
 #include "core/pose_conversion.h"
 #include "core/pose_quality_service.h"
+#include "core/reliability_pipeline_service.h"
 #include "core/synthetic_dataset.h"
 #include "io/dataset_io.h"
 #include "io/image_sample_io.h"
@@ -802,6 +803,44 @@ void CalibrationController::calculateAll()
     });
     watcher->setFuture(QtConcurrent::run([dataset]() {
         return CalibrationService::calibrateAll(dataset);
+    }));
+}
+
+void CalibrationController::runReliabilityPipeline(int bootstrapResamples,
+                                                    double confidenceLevel)
+{
+    const int resamples = bootstrapResamples > 0 ? bootstrapResamples : m_dataset.bootstrapResamples;
+    const double confidence = confidenceLevel > 0.0 ? confidenceLevel : m_dataset.bootstrapConfidence;
+    if (resamples <= 0 || confidence <= 0.0 || confidence >= 1.0) {
+        emit error(QStringLiteral("可靠性流水线参数错误"),
+                   QStringLiteral("Bootstrap 次数必须大于 0，置信度必须在 0 和 1 之间。"));
+        return;
+    }
+
+    emit reliabilityPipelineStarted();
+    const CalibrationDataset dataset = m_dataset;
+    auto *watcher = new QFutureWatcher<ReliabilityPipelineExecution>(this);
+    connect(watcher, &QFutureWatcher<ReliabilityPipelineExecution>::finished, this,
+            [this, watcher]() {
+                const ReliabilityPipelineExecution execution = watcher->result();
+                m_dataset = execution.refinedDataset;
+                m_dataset.reliabilityPipelineReport = execution.report;
+                emitDatasetChanged();
+                emit reliabilityPipelineChanged(execution.report);
+                if (execution.finalResult.success) {
+                    applyResiduals(execution.finalResult.trainingReport);
+                    emit reliabilityChanged(execution.finalResult);
+                    emit matrixChanged(execution.finalResult);
+                }
+                emit statusChanged(execution.report.message);
+                emit logMessage(QStringLiteral("%1（耗时 %2 ms）")
+                                    .arg(execution.report.message)
+                                    .arg(execution.report.elapsedMs));
+                emit reliabilityPipelineFinished();
+                watcher->deleteLater();
+            });
+    watcher->setFuture(QtConcurrent::run([dataset, resamples, confidence]() {
+        return ReliabilityPipelineService::run(dataset, resamples, confidence);
     }));
 }
 
