@@ -40,6 +40,13 @@ public:
     void deleteSamples(const QVector<int> &ids);
     bool applyManualPoseInputs(const QVector<ManualPoseInput> &inputs,
                                const PoseInputSpec &spec);
+    bool applyManualPointInputs(const QVector<PointSample> &samples,
+                                const PoseInputSpec &spec);
+
+    FixedTargetPoseReport computeFixedTargetPose(const CalibrationResult &result,
+                                                 int referenceSampleId = -1);
+    CalibrationResult optimizeRecommendedResult();
+    PoseQualityReport evaluatePoseQuality() const;
 
     // Calculation (async)
     void calculateSelected(CalibrationMethod method);

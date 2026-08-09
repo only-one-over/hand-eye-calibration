@@ -5,7 +5,10 @@
 #include "core/calibration_service.h"
 #include "core/dataset_validator.h"
 #include "core/matrix_utils.h"
+#include "core/nonlinear_optimizer.h"
+#include "core/point_calibration_service.h"
 #include "core/pose_conversion.h"
+#include "core/pose_quality_service.h"
 #include "core/synthetic_dataset.h"
 #include "io/dataset_io.h"
 #include "io/image_sample_io.h"
@@ -39,9 +42,15 @@ void CalibrationController::updateImageProcessing(const BoardSpec &board,
                                                    const CameraIntrinsics &intrinsics)
 {
     const bool boardChanged = m_dataset.boardSpec.pattern != board.pattern
+                              || m_dataset.boardSpec.chessboardDetector != board.chessboardDetector
+                              || m_dataset.boardSpec.pnpMethod != board.pnpMethod
                               || m_dataset.boardSpec.innerCornersX != board.innerCornersX
                               || m_dataset.boardSpec.innerCornersY != board.innerCornersY
-                              || std::abs(m_dataset.boardSpec.squareSizeM - board.squareSizeM) > 1e-12;
+                              || std::abs(m_dataset.boardSpec.squareSizeM - board.squareSizeM) > 1e-12
+                              || m_dataset.boardSpec.arucoDictionary != board.arucoDictionary
+                              || m_dataset.boardSpec.markerCountX != board.markerCountX
+                              || m_dataset.boardSpec.markerCountY != board.markerCountY
+                              || std::abs(m_dataset.boardSpec.markerSizeM - board.markerSizeM) > 1e-12;
     m_dataset.boardSpec = board;
     m_dataset.cameraIntrinsics = intrinsics;
     m_dataset.results.clear();
@@ -293,6 +302,28 @@ bool CalibrationController::processBoardImages()
         sample.imageStatus = estimate.status;
         sample.detectedCornerCount = estimate.detectedCornerCount;
         sample.pnpReprojectionRmsePx = estimate.reprojectionRmsePx;
+        sample.imageWidth = estimate.imageWidth;
+        sample.imageHeight = estimate.imageHeight;
+        sample.detectionMethod = estimate.detectionMethod;
+        sample.selectedPnpMethod = estimate.selectedPnpMethod;
+        sample.iterativePnpRmsePx = estimate.iterativePnpRmsePx;
+        sample.ippePnpRmsePx = estimate.ippePnpRmsePx;
+        if (sample.imageWidth > 0 && sample.imageHeight > 0 && estimate.success
+            && estimate.detectedCornerCount > 0) {
+            double centerX = 0.0;
+            double centerY = 0.0;
+            const BoardCornerDetection detected = BoardPoseEstimator::detectChessboard(
+                sample.imagePath, m_dataset.boardSpec);
+            for (const Vector2 &corner : detected.corners) {
+                centerX += corner[0];
+                centerY += corner[1];
+            }
+            sample.imageCenterXNorm = centerX / estimate.detectedCornerCount / sample.imageWidth;
+            sample.imageCenterYNorm = centerY / estimate.detectedCornerCount / sample.imageHeight;
+        } else {
+            sample.imageCenterXNorm = 0.5;
+            sample.imageCenterYNorm = 0.5;
+        }
         sample.imageMessage = estimate.message;
         if (estimate.success) {
             sample.targetRotation = estimate.targetRotation;
@@ -386,6 +417,16 @@ void CalibrationController::exportPython(const QString &path, const CalibrationR
 void CalibrationController::deleteSamples(const QVector<int> &ids)
 {
     if (ids.isEmpty()) return;
+    if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+        QVector<PointSample> kept;
+        for (const PointSample &sample : std::as_const(m_dataset.pointSamples))
+            if (!ids.contains(sample.id)) kept.append(sample);
+        m_dataset.pointSamples = kept;
+        m_dataset.results.clear();
+        emitDatasetChanged();
+        emit logMessage(QStringLiteral("已删除 %1 组点基样本，结果已清空。").arg(ids.size()));
+        return;
+    }
     QVector<PoseSample> kept;
     for (const PoseSample &sample : std::as_const(m_dataset.samples))
         if (!ids.contains(sample.id)) kept.append(sample);
@@ -482,9 +523,11 @@ bool CalibrationController::applyManualPoseInputs(const QVector<ManualPoseInput>
 
     CalibrationDataset candidate = m_dataset;
     candidate.mode = CalibrationMode::EyeInHand;
+    candidate.inputMode = CalibrationInputMode::PosePairs;
     candidate.inputSpec = spec;
     candidate.inputSpec.direction = PoseDirection::GripperToBase;
     candidate.samples = samples;
+    candidate.pointSamples.clear();
     candidate.targetPosesReady = true;
     candidate.results.clear();
     candidate.hasGroundTruth = false;
@@ -496,7 +539,9 @@ bool CalibrationController::applyManualPoseInputs(const QVector<ManualPoseInput>
 
     m_dataset.inputSpec = candidate.inputSpec;
     m_dataset.mode = CalibrationMode::EyeInHand;
+    m_dataset.inputMode = CalibrationInputMode::PosePairs;
     m_dataset.samples = samples;
+    m_dataset.pointSamples.clear();
     m_dataset.targetPosesReady = true;
     m_dataset.results.clear();
     m_dataset.hasGroundTruth = false;
@@ -510,9 +555,181 @@ bool CalibrationController::applyManualPoseInputs(const QVector<ManualPoseInput>
     return true;
 }
 
+bool CalibrationController::applyManualPointInputs(const QVector<PointSample> &inputs,
+                                                    const PoseInputSpec &spec)
+{
+    if (inputs.size() < 5) {
+        emit error(QStringLiteral("点基数据不足"),
+                   QStringLiteral("FixedPoint3D 至少需要 5 组 TCP 与相机 XYZ 数据。"));
+        return false;
+    }
+
+    QSet<int> ids;
+    QVector<PointSample> samples;
+    samples.reserve(inputs.size());
+    QStringList errors;
+    PoseInputSpec tcpSpec = spec;
+    tcpSpec.direction = PoseDirection::GripperToBase;
+    const double lengthScale = spec.lengthUnit == LengthUnit::Millimeters ? 1e-3 : 1.0;
+    for (int index = 0; index < inputs.size(); ++index) {
+        const PointSample &input = inputs.at(index);
+        if (input.id <= 0) {
+            errors << QStringLiteral("第 %1 组样本 ID 必须为正整数。").arg(index + 1);
+            continue;
+        }
+        if (ids.contains(input.id)) {
+            errors << QStringLiteral("样本 ID 重复：%1。").arg(input.id);
+            continue;
+        }
+        ids.insert(input.id);
+        if (!matrix::isFinite(input.gripperRotation) || !matrix::isFinite(input.gripperTranslation)
+            || !matrix::isFinite(input.cameraPoint)) {
+            errors << QStringLiteral("第 %1 组包含非有限数值。").arg(index + 1);
+            continue;
+        }
+        if (spec.rotationFormat == RotationFormat::QuaternionWXYZ) {
+            errors << QStringLiteral("FixedPoint3D 手动输入的 TCP 旋转需要 3 个轴值；请使用 Rodrigues、Euler XYZ 或 RPY。")
+                          .arg(index + 1);
+            continue;
+        }
+
+        const Vector4 rotation{input.gripperRotation[0], input.gripperRotation[1],
+                               input.gripperRotation[2], 0.0};
+        const auto tcp = pose::normalize(rotation, input.gripperTranslation, tcpSpec);
+        if (!tcp.success) {
+            errors << QStringLiteral("第 %1 组 TCP 标准化失败：%2").arg(index + 1).arg(tcp.error);
+            continue;
+        }
+        PointSample sample;
+        sample.id = input.id;
+        sample.gripperRotation = tcp.rotation;
+        sample.gripperTranslation = tcp.translation;
+        sample.cameraPoint = {input.cameraPoint[0] * lengthScale,
+                              input.cameraPoint[1] * lengthScale,
+                              input.cameraPoint[2] * lengthScale};
+        sample.label = input.label.trimmed().isEmpty()
+                           ? QStringLiteral("手动点基输入 #%1").arg(input.id)
+                           : input.label.trimmed();
+        samples.append(sample);
+    }
+
+    if (!errors.isEmpty()) {
+        emit error(QStringLiteral("FixedPoint3D 数据校验失败"), errors.join('\n'));
+        return false;
+    }
+
+    m_dataset.mode = CalibrationMode::EyeInHand;
+    m_dataset.inputMode = CalibrationInputMode::FixedPoint3D;
+    m_dataset.inputSpec = spec;
+    m_dataset.inputSpec.direction = PoseDirection::GripperToBase;
+    m_dataset.pointSamples = samples;
+    m_dataset.samples.clear();
+    m_dataset.targetPosesReady = false;
+    m_dataset.results.clear();
+    m_dataset.hasGroundTruth = false;
+    emitDatasetChanged();
+    emit reliabilityChanged(CalibrationResult{});
+    emit matrixChanged(CalibrationResult{});
+    emit statusChanged(QStringLiteral("已应用 %1 组 FixedPoint3D 点基数据。相机端仅使用 XYZ，不需要 rx/ry/rz。")
+                           .arg(samples.size()));
+    emit logMessage(QStringLiteral("手动点基数据已替换当前训练集，共 %1 组。").arg(samples.size()));
+    return true;
+}
+
+FixedTargetPoseReport CalibrationController::computeFixedTargetPose(const CalibrationResult &result,
+                                                                     int referenceSampleId)
+{
+    if (m_dataset.inputMode != CalibrationInputMode::PosePairs || !result.success) {
+        FixedTargetPoseReport report;
+        report.errors << QStringLiteral("当前需要成功的 PosePairs 结果才能计算 fixed target pose。");
+        return report;
+    }
+    const FixedTargetPoseReport report = PoseQualityService::computeFixedTargetPose(
+        m_dataset, result.cameraToGripper, referenceSampleId);
+    CalibrationResult updated = result;
+    for (CalibrationResult &stored : m_dataset.results) {
+        if (stored.method == result.method) {
+            stored.fixedTargetReport = report;
+            stored.qualityReport = PoseQualityService::evaluatePoseQuality(m_dataset);
+            updated = stored;
+        }
+    }
+    emitDatasetChanged();
+    emit reliabilityChanged(updated);
+    return report;
+}
+
+CalibrationResult CalibrationController::optimizeRecommendedResult()
+{
+    CalibrationResult optimized;
+    const CalibrationResult seed = recommendedResult();
+    if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+        optimized = PointCalibrationService::calibrate(m_dataset);
+    } else {
+        if (!seed.success) {
+            emit error(QStringLiteral("无法精修"), QStringLiteral("请先计算一个成功的推荐结果。"));
+            return optimized;
+        }
+        optimized = NonlinearOptimizer::refinePose(m_dataset, seed);
+    }
+    for (CalibrationResult &stored : m_dataset.results) stored.recommended = false;
+    if (optimized.success) {
+        optimized.recommended = true;
+        bool replaced = false;
+        for (CalibrationResult &stored : m_dataset.results) {
+            if (stored.method == optimized.method) {
+                stored = optimized;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) m_dataset.results.append(optimized);
+    }
+    if (optimized.method == CalibrationMethod::PointBased && optimized.success) {
+        m_dataset.results = {optimized};
+    }
+    if (optimized.success) applyResiduals(optimized.trainingReport);
+    emitDatasetChanged();
+    emit reliabilityChanged(optimized);
+    emit matrixChanged(optimized);
+    emit logMessage(optimized.message);
+    return optimized;
+}
+
+PoseQualityReport CalibrationController::evaluatePoseQuality() const
+{
+    return m_dataset.inputMode == CalibrationInputMode::FixedPoint3D
+               ? PoseQualityService::evaluatePointQuality(m_dataset)
+               : PoseQualityService::evaluatePoseQuality(m_dataset);
+}
+
 void CalibrationController::calculateSelected(CalibrationMethod method)
 {
     m_dataset.mode = CalibrationMode::EyeInHand;
+    if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+        if (m_dataset.pointSamples.size() < 5) {
+            emit error(QStringLiteral("无法计算"), QStringLiteral("FixedPoint3D 至少需要 5 组点基样本。"));
+            return;
+        }
+        emit calculationStarted();
+        const CalibrationDataset dataset = m_dataset;
+        auto *watcher = new QFutureWatcher<CalibrationResult>(this);
+        connect(watcher, &QFutureWatcher<CalibrationResult>::finished, this, [this, watcher]() {
+            const CalibrationResult result = watcher->result();
+            m_dataset.results = result.success ? QVector<CalibrationResult>{result} : QVector<CalibrationResult>{};
+            if (result.success) emit reliabilityChanged(result);
+            emitDatasetChanged();
+            if (result.success) emit matrixChanged(result);
+            emit logMessage(result.message);
+            emit calculationFinished();
+            watcher->deleteLater();
+        });
+        watcher->setFuture(QtConcurrent::run([dataset]() {
+            return PointCalibrationService::calibrate(dataset);
+        }));
+        Q_UNUSED(method)
+        return;
+    }
     if (!ensureTargetPosesReady()) return;
     const ValidationReport validation = validateDataset(m_dataset);
     if (!validation.valid) {
@@ -543,6 +760,10 @@ void CalibrationController::calculateSelected(CalibrationMethod method)
 
 void CalibrationController::calculateAll()
 {
+    if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+        calculateSelected(CalibrationMethod::PointBased);
+        return;
+    }
     m_dataset.mode = CalibrationMode::EyeInHand;
     if (!ensureTargetPosesReady()) return;
     const ValidationReport validation = validateDataset(m_dataset);

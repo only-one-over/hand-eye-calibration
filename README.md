@@ -125,3 +125,11 @@ src/
   mainwindow  Qt 6 用户界面
 docs/plans/   功能设计与实施计划
 ```
+
+## FixedPoint3D、质量评分与检测升级
+
+除了 PosePairs（TCP 6D + target→camera 6D），当前版本还支持 FixedPoint3D：每组输入机器人 TCP 的 `gripper→base` 6D 位姿，以及相机坐标系中同一个固定物理点的 `Xc,Yc,Zc`。点基模式不需要相机 `rx/ry/rz`，程序会联合求解 `camera→gripper` 和 base 固定点。
+
+结果页提供 fixed target pose、每个 sample 到鲁棒均值或指定 reference 的误差、Huber 非线性精修、优化前后 RMSE，以及由样本数量、旋转幅度、旋转轴和空间分布组成的 Pose Quality Score。
+
+标定板支持 Chessboard（`findChessboardCornersSB` 优先、Classic 回退）、ChArUco 和 ArUco Grid。平面 PnP 会比较 `SOLVEPNP_ITERATIVE` 与 `SOLVEPNP_IPPE`，并保存检测器、PnP 方法和误差摘要。

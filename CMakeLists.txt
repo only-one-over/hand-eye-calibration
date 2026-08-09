@@ -68,6 +68,12 @@ set(PROJECT_SOURCES
     src/core/board_pose_estimator.h
     src/core/camera_calibration_service.cpp
     src/core/camera_calibration_service.h
+    src/core/pose_quality_service.cpp
+    src/core/pose_quality_service.h
+    src/core/nonlinear_optimizer.cpp
+    src/core/nonlinear_optimizer.h
+    src/core/point_calibration_service.cpp
+    src/core/point_calibration_service.h
     src/core/pose_conversion.cpp
     src/core/pose_conversion.h
     src/core/dataset_validator.cpp

@@ -35,8 +35,8 @@ private slots:
     void onCalibrateCameraIntrinsics();
     void onApplyCameraIntrinsics();
     void onClearCameraCalibrationImages();
-    void onApplyManualPoseInputs(const QVector<ManualPoseInput> &inputs,
-                                 const PoseInputSpec &spec, bool calculateAll);
+    void onApplyManualPointInputs(const QVector<PointSample> &samples,
+                                  const PoseInputSpec &spec, bool calculateAll);
     void onImportPoseImageCsv();
     void onImportProcessedCsv();
     void onImportValidationCsv();
@@ -45,6 +45,8 @@ private slots:
     void onExportRequested(const QString &kind);
     void onCalculateSelected();
     void onCalculateAll();
+    void onComputeFixedTarget(int referenceSampleId);
+    void onOptimizeRecommended();
     void onProcessBoardImages();
     void onSamplesChanged(const QVector<PoseSample> &samples);
     void onResultsChanged(const QVector<CalibrationResult> &results);

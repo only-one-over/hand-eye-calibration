@@ -2,6 +2,7 @@
 
 #include "core/dataset_validator.h"
 #include "core/matrix_utils.h"
+#include "core/pose_quality_service.h"
 
 #include <opencv2/calib3d.hpp>
 
@@ -199,6 +200,8 @@ CalibrationResult CalibrationService::calibrate(const CalibrationDataset &datase
             result.validationReport = evaluate(dataset, dataset.validationSamples, cameraToGripper);
         result.rotationErrorDeg = result.trainingReport.rotationRmseDeg;
         result.translationError = result.trainingReport.translationRmseM;
+        result.fixedTargetReport = PoseQualityService::computeFixedTargetPose(dataset, result.cameraToGripper);
+        result.qualityReport = PoseQualityService::evaluatePoseQuality(dataset);
         result.success = true;
         result.message = result.trainingReport.passed ? QStringLiteral("计算成功，训练数据通过")
                                                        : QStringLiteral("计算成功，但可靠性未通过");

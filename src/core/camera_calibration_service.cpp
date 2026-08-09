@@ -4,6 +4,8 @@
 
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
+#include <opencv2/objdetect/aruco_board.hpp>
+#include <opencv2/objdetect/aruco_dictionary.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -24,7 +26,7 @@ struct FitResult {
     QString error;
 };
 
-std::vector<cv::Point3f> makeObjectPoints(const BoardSpec &board)
+std::vector<cv::Point3f> makeChessObjectPoints(const BoardSpec &board)
 {
     std::vector<cv::Point3f> points;
     points.reserve(static_cast<size_t>(board.innerCornersX * board.innerCornersY));
@@ -35,6 +37,43 @@ std::vector<cv::Point3f> makeObjectPoints(const BoardSpec &board)
         }
     }
     return points;
+}
+
+std::vector<cv::Point2f> toCvPoints(const QVector<Vector2> &points);
+
+bool makeViewPoints(const CameraCalibrationSample &sample,
+                    const BoardSpec &board,
+                    std::vector<cv::Point3f> *objectPoints,
+                    std::vector<cv::Point2f> *imagePoints)
+{
+    if (!objectPoints || !imagePoints) return false;
+    objectPoints->clear();
+    imagePoints->clear();
+    if (board.pattern == BoardPattern::Chessboard) {
+        *objectPoints = makeChessObjectPoints(board);
+        *imagePoints = toCvPoints(sample.corners);
+        return objectPoints->size() == imagePoints->size();
+    }
+    const cv::aruco::Dictionary dictionary = cv::aruco::getPredefinedDictionary(board.arucoDictionary);
+    if (board.pattern == BoardPattern::Charuco) {
+        const cv::aruco::CharucoBoard charucoBoard(
+            cv::Size(board.innerCornersX + 1, board.innerCornersY + 1),
+            static_cast<float>(board.squareSizeM), static_cast<float>(board.markerSizeM), dictionary);
+        const auto boardCorners = charucoBoard.getChessboardCorners();
+        *imagePoints = toCvPoints(sample.corners);
+        for (int id : sample.cornerIds)
+            if (id >= 0 && id < static_cast<int>(boardCorners.size())) objectPoints->push_back(boardCorners[id]);
+        return objectPoints->size() == imagePoints->size() && objectPoints->size() >= 4;
+    }
+    const cv::aruco::GridBoard gridBoard(
+        cv::Size(board.markerCountX, board.markerCountY), static_cast<float>(board.markerSizeM),
+        static_cast<float>(board.markerSizeM * 0.25), dictionary);
+    std::vector<std::vector<cv::Point2f>> markerCorners;
+    for (const QVector<Vector2> &marker : sample.markerCorners) markerCorners.push_back(toCvPoints(marker));
+    std::vector<int> ids;
+    for (int id : sample.cornerIds) ids.push_back(id);
+    gridBoard.matchImagePoints(markerCorners, ids, *objectPoints, *imagePoints);
+    return objectPoints->size() == imagePoints->size() && objectPoints->size() >= 4;
 }
 
 std::vector<cv::Point2f> toCvPoints(const QVector<Vector2> &points)
@@ -96,15 +135,20 @@ FitResult fit(const QVector<CameraCalibrationSample> &samples,
         return result;
     }
 
-    const std::vector<cv::Point3f> objectPoints = makeObjectPoints(board);
     std::vector<std::vector<cv::Point3f>> objectViews;
     std::vector<std::vector<cv::Point2f>> imageViews;
     objectViews.reserve(static_cast<size_t>(indices.size()));
     imageViews.reserve(static_cast<size_t>(indices.size()));
     for (int index : indices) {
         const CameraCalibrationSample &sample = samples.at(index);
+        std::vector<cv::Point3f> objectPoints;
+        std::vector<cv::Point2f> imagePoints;
+        if (!makeViewPoints(sample, board, &objectPoints, &imagePoints)) {
+            result.error = QStringLiteral("第 %1 张图片的标定板点数或 ID 无效。").arg(index + 1);
+            return result;
+        }
         objectViews.push_back(objectPoints);
-        imageViews.push_back(toCvPoints(sample.corners));
+        imageViews.push_back(imagePoints);
     }
 
     try {
@@ -305,6 +349,9 @@ CameraCalibrationReport CameraCalibrationService::detectImages(const QStringList
         sample.imageWidth = detection.imageWidth;
         sample.imageHeight = detection.imageHeight;
         sample.corners = detection.corners;
+        sample.cornerIds = detection.cornerIds;
+        sample.markerCorners = detection.markerCorners;
+        sample.detectionMethod = detection.detectionMethod;
         sample.detectedCornerCount = detection.corners.size();
         sample.message = detection.message;
         if (detection.success) {

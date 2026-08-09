@@ -17,14 +17,17 @@ using Vector3 = std::array<double, 3>;
 using Vector4 = std::array<double, 4>;
 using Vector5 = std::array<double, 5>;
 
-enum class CalibrationMethod { Tsai, Park, Horaud, Andreff, Daniilidis };
+enum class CalibrationMethod { Tsai, Park, Horaud, Andreff, Daniilidis, PointBased, Nonlinear };
 enum class CalibrationMode { EyeInHand, EyeToHand };
+enum class CalibrationInputMode { PosePairs, FixedPoint3D };
 enum class RotationFormat { Rodrigues, EulerXYZ, RPY, QuaternionWXYZ };
 enum class AngleUnit { Radians, Degrees };
 enum class LengthUnit { Meters, Millimeters };
 enum class PoseDirection { GripperToBase, TargetToCamera, CameraToGripper };
 enum class PoseAdapterKind { Generic, UniversalRobots, Kuka, Fanuc };
-enum class BoardPattern { Chessboard };
+enum class BoardPattern { Chessboard, Charuco, ArucoGrid };
+enum class ChessboardDetector { Auto, Classic, SB };
+enum class PnpMethod { Auto, Iterative, IPPE };
 enum class ImageSampleStatus {
     NotProcessed,
     ImageMissing,
@@ -53,6 +56,17 @@ struct ManualPoseInput {
     QString label;
 };
 
+struct PointSample {
+    int id = 0;
+    Vector3 gripperRotation{};
+    Vector3 gripperTranslation{};
+    Vector3 cameraPoint{};
+    QString label;
+    Vector3 predictedBasePoint{};
+    double residualM = 0.0;
+    bool outlier = false;
+};
+
 struct SampleResidual {
     int sampleId = 0;
     double rotationErrorDeg = 0.0;
@@ -64,9 +78,15 @@ struct SampleResidual {
 
 struct BoardSpec {
     BoardPattern pattern = BoardPattern::Chessboard;
+    ChessboardDetector chessboardDetector = ChessboardDetector::Auto;
+    PnpMethod pnpMethod = PnpMethod::Auto;
     int innerCornersX = 9;
     int innerCornersY = 6;
     double squareSizeM = 0.025;
+    int arucoDictionary = 0;
+    int markerCountX = 5;
+    int markerCountY = 7;
+    double markerSizeM = 0.01875;
 };
 
 struct CameraIntrinsics {
@@ -90,6 +110,9 @@ struct CameraCalibrationSample {
     CameraCalibrationSampleStatus status = CameraCalibrationSampleStatus::NotProcessed;
     QString message;
     QVector<Vector2> corners;
+    QVector<int> cornerIds;
+    QVector<QVector<Vector2>> markerCorners;
+    QString detectionMethod;
 };
 
 struct CameraCalibrationReport {
@@ -132,6 +155,87 @@ struct ReliabilityReport {
     QVector<SampleResidual> sampleResiduals;
 };
 
+struct FixedTargetPoseSample {
+    int sampleId = 0;
+    Matrix4 predictedPose{};
+    Vector3 predictedRotation{};
+    Vector3 predictedTranslation{};
+    double rotationErrorToMeanDeg = 0.0;
+    double translationErrorToMeanM = 0.0;
+    double rotationErrorToReferenceDeg = 0.0;
+    double translationErrorToReferenceM = 0.0;
+    bool outlier = false;
+};
+
+struct FixedTargetPoseReport {
+    bool available = false;
+    bool success = false;
+    int referenceSampleId = -1;
+    Matrix4 robustMeanPose{};
+    Vector3 robustMeanRotation{};
+    Vector3 robustMeanTranslation{};
+    double rotationRmseDeg = 0.0;
+    double translationRmseM = 0.0;
+    double rotationMeanDeg = 0.0;
+    double translationMeanM = 0.0;
+    double rotationMaxDeg = 0.0;
+    double translationMaxM = 0.0;
+    int outlierCount = 0;
+    QStringList errors;
+    QStringList warnings;
+    QVector<FixedTargetPoseSample> samples;
+};
+
+struct FixedPointSample {
+    int sampleId = 0;
+    Vector3 predictedBasePoint{};
+    double residualM = 0.0;
+    bool outlier = false;
+};
+
+struct FixedPointReport {
+    bool available = false;
+    bool success = false;
+    Vector3 robustMeanPoint{};
+    double rmseM = 0.0;
+    double meanErrorM = 0.0;
+    double maxErrorM = 0.0;
+    int outlierCount = 0;
+    QStringList errors;
+    QStringList warnings;
+    QVector<FixedPointSample> samples;
+};
+
+struct PoseQualityReport {
+    bool available = false;
+    bool calculable = false;
+    int sampleScore = 0;
+    int rotationAmplitudeScore = 0;
+    int rotationAxisScore = 0;
+    int spatialDistributionScore = 0;
+    int totalScore = 0;
+    QString level;
+    double maxRelativeRotationDeg = 0.0;
+    int independentAxisCount = 0;
+    bool nearMidFarCoverage = false;
+    bool fullFovCoverage = false;
+    bool imageCoverageAvailable = false;
+    QStringList warnings;
+};
+
+struct NonlinearOptimizationReport {
+    bool available = false;
+    bool success = false;
+    bool converged = false;
+    int iterations = 0;
+    int huberOutlierCount = 0;
+    double beforeRotationRmseDeg = 0.0;
+    double beforeTranslationRmseM = 0.0;
+    double afterRotationRmseDeg = 0.0;
+    double afterTranslationRmseM = 0.0;
+    QString message;
+};
+
 // All PoseSample values are canonical: Rodrigues radians and meters.
 struct PoseSample {
     int id = 0;
@@ -148,6 +252,14 @@ struct PoseSample {
     int detectedCornerCount = 0;
     double pnpReprojectionRmsePx = 0.0;
     QString imageMessage;
+    int imageWidth = 0;
+    int imageHeight = 0;
+    double imageCenterXNorm = 0.5;
+    double imageCenterYNorm = 0.5;
+    QString detectionMethod;
+    PnpMethod selectedPnpMethod = PnpMethod::Auto;
+    double iterativePnpRmsePx = 0.0;
+    double ippePnpRmsePx = 0.0;
 };
 
 struct CalibrationResult {
@@ -161,12 +273,18 @@ struct CalibrationResult {
     QString message;
     ReliabilityReport trainingReport;
     ReliabilityReport validationReport;
+    FixedTargetPoseReport fixedTargetReport;
+    FixedPointReport fixedPointReport;
+    PoseQualityReport qualityReport;
+    NonlinearOptimizationReport optimizationReport;
 };
 
 struct CalibrationDataset {
     QVector<PoseSample> samples;
     QVector<PoseSample> validationSamples;
     bool targetPosesReady = false;
+    CalibrationInputMode inputMode = CalibrationInputMode::PosePairs;
+    QVector<PointSample> pointSamples;
     CalibrationMode mode = CalibrationMode::EyeInHand;
     PoseInputSpec inputSpec;
     QString robotName = QStringLiteral("未指定机器人");
@@ -191,6 +309,8 @@ inline QString methodName(CalibrationMethod method)
     case CalibrationMethod::Horaud: return QStringLiteral("Horaud");
     case CalibrationMethod::Andreff: return QStringLiteral("Andreff");
     case CalibrationMethod::Daniilidis: return QStringLiteral("Daniilidis");
+    case CalibrationMethod::PointBased: return QStringLiteral("FixedPoint3D 点基");
+    case CalibrationMethod::Nonlinear: return QStringLiteral("非线性精修");
     }
     return QStringLiteral("Unknown");
 }
@@ -224,6 +344,13 @@ inline QString directionName(PoseDirection direction)
     case PoseDirection::CameraToGripper: return QStringLiteral("camera → gripper");
     }
     return QStringLiteral("Unknown");
+}
+
+inline QString inputModeName(CalibrationInputMode mode)
+{
+    return mode == CalibrationInputMode::FixedPoint3D
+               ? QStringLiteral("FixedPoint3D 点基")
+               : QStringLiteral("PosePairs 位姿对");
 }
 
 inline QString imageSampleStatusName(ImageSampleStatus status)
@@ -270,8 +397,32 @@ inline CameraCalibrationSampleStatus cameraCalibrationSampleStatusFromName(const
 
 inline QString boardPatternName(BoardPattern pattern)
 {
-    return pattern == BoardPattern::Chessboard ? QStringLiteral("Chessboard")
-                                               : QStringLiteral("Unknown");
+    switch (pattern) {
+    case BoardPattern::Chessboard: return QStringLiteral("Chessboard");
+    case BoardPattern::Charuco: return QStringLiteral("ChArUco");
+    case BoardPattern::ArucoGrid: return QStringLiteral("ArUco Grid");
+    }
+    return QStringLiteral("Unknown");
+}
+
+inline QString chessboardDetectorName(ChessboardDetector detector)
+{
+    switch (detector) {
+    case ChessboardDetector::Auto: return QStringLiteral("Auto (SB 优先)");
+    case ChessboardDetector::Classic: return QStringLiteral("Classic");
+    case ChessboardDetector::SB: return QStringLiteral("SB");
+    }
+    return QStringLiteral("Unknown");
+}
+
+inline QString pnpMethodName(PnpMethod method)
+{
+    switch (method) {
+    case PnpMethod::Auto: return QStringLiteral("Auto (ITERATIVE/IPPE)");
+    case PnpMethod::Iterative: return QStringLiteral("ITERATIVE");
+    case PnpMethod::IPPE: return QStringLiteral("IPPE");
+    }
+    return QStringLiteral("Unknown");
 }
 
 inline QVector<CalibrationMethod> allMethods()

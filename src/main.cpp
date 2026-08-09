@@ -4,7 +4,11 @@
 #include "core/camera_calibration_service.h"
 #include "core/calibration_service.h"
 #include "core/dataset_validator.h"
+#include "core/matrix_utils.h"
 #include "core/pose_conversion.h"
+#include "core/nonlinear_optimizer.h"
+#include "core/point_calibration_service.h"
+#include "core/pose_quality_service.h"
 #include "core/synthetic_dataset.h"
 #include "controllers/calibration_controller.h"
 #include "io/dataset_io.h"
@@ -54,6 +58,13 @@ double matrix3MaxError(const handeye::Matrix3 &left, const handeye::Matrix3 &rig
         for (int col = 0; col < 3; ++col)
             result = std::max(result, std::abs(left[row][col] - right[row][col]));
     return result;
+}
+
+handeye::Vector3 transformPoint(const cv::Matx44d &pose, const handeye::Vector3 &point)
+{
+    return {pose(0, 0) * point[0] + pose(0, 1) * point[1] + pose(0, 2) * point[2] + pose(0, 3),
+            pose(1, 0) * point[0] + pose(1, 1) * point[1] + pose(1, 2) * point[2] + pose(1, 3),
+            pose(2, 0) * point[0] + pose(2, 1) * point[1] + pose(2, 2) * point[2] + pose(2, 3)};
 }
 
 QVector<handeye::CameraCalibrationSample> makeSyntheticCameraObservations(
@@ -158,6 +169,44 @@ int main(int argc, char *argv[])
             sample.gripperRotation = {0.0, 0.0, 0.0};
         const bool degeneracyOk = !handeye::validateDataset(degenerateDataset).valid;
 
+        handeye::CalibrationDataset pointDataset;
+        pointDataset.inputMode = handeye::CalibrationInputMode::FixedPoint3D;
+        const cv::Matx44d pointTruth = handeye::matrix::toMat(dataset.groundTruthCameraToGripper);
+        const handeye::Vector3 fixedBasePoint{0.25, -0.12, 0.55};
+        for (const handeye::PoseSample &poseSample : dataset.samples) {
+            const cv::Matx44d gripper = handeye::matrix::fromRodrigues(poseSample.gripperRotation,
+                                                                        poseSample.gripperTranslation);
+            const cv::Matx44d cameraPointPose = handeye::matrix::inverse(pointTruth)
+                                                * handeye::matrix::inverse(gripper);
+            handeye::PointSample pointSample;
+            pointSample.id = poseSample.id;
+            pointSample.gripperRotation = poseSample.gripperRotation;
+            pointSample.gripperTranslation = poseSample.gripperTranslation;
+            pointSample.cameraPoint = transformPoint(cameraPointPose, fixedBasePoint);
+            pointDataset.pointSamples.append(pointSample);
+        }
+        const auto pointResult = handeye::PointCalibrationService::calibrate(pointDataset);
+        const bool pointCalibrationOk = pointResult.success
+                                        && matrixMaxError(pointResult.cameraToGripper,
+                                                          dataset.groundTruthCameraToGripper) < 1e-4
+                                        && pointResult.fixedPointReport.rmseM < 1e-6;
+        const auto fixedTargetReport = handeye::PoseQualityService::computeFixedTargetPose(
+            dataset, results.first().cameraToGripper);
+        const auto qualityReport = handeye::PoseQualityService::evaluatePoseQuality(dataset);
+        const auto nonlinearResult = handeye::NonlinearOptimizer::refinePose(dataset, results.first());
+        const bool fixedTargetOk = fixedTargetReport.success && fixedTargetReport.samples.size() == dataset.samples.size();
+        const bool qualityOk = qualityReport.available && qualityReport.totalScore > 0;
+        const bool nonlinearOk = nonlinearResult.success
+                                 && nonlinearResult.optimizationReport.afterTranslationRmseM
+                                        <= nonlinearResult.optimizationReport.beforeTranslationRmseM + 1e-9;
+        handeye::CalibrationController pointController;
+        const bool manualPointApplyOk = pointController.applyManualPointInputs(pointDataset.pointSamples,
+                                                                                 handeye::PoseInputSpec{})
+                                        && pointController.dataset().inputMode
+                                               == handeye::CalibrationInputMode::FixedPoint3D
+                                        && pointController.dataset().pointSamples.size()
+                                               == pointDataset.pointSamples.size();
+
         handeye::CalibrationController manualController;
         handeye::PoseInputSpec manualSpec;
         QVector<handeye::ManualPoseInput> manualInputs;
@@ -238,7 +287,11 @@ int main(int argc, char *argv[])
         const bool pairedImportOk = pairedRead.success && pairedDataset.samples.size() == 1
                                     && pairedDataset.samples.first().imagePath == chessboardPath;
 
-        const handeye::BoardSpec cameraBoard{handeye::BoardPattern::Chessboard, 9, 6, 0.025};
+        handeye::BoardSpec cameraBoard;
+        cameraBoard.pattern = handeye::BoardPattern::Chessboard;
+        cameraBoard.innerCornersX = 9;
+        cameraBoard.innerCornersY = 6;
+        cameraBoard.squareSizeM = 0.025;
         const handeye::Matrix3 knownCameraMatrix{{{800.0, 0.0, 320.0},
                                                    {0.0, 820.0, 240.0},
                                                    {0.0, 0.0, 1.0}}};
@@ -286,6 +339,9 @@ int main(int argc, char *argv[])
         jsonSource.cameraCalibrationReport = cameraReport;
         const auto jsonWrite = handeye::writeJson(tempDir.filePath(QStringLiteral("samples.json")), jsonSource);
         const auto jsonRead = handeye::readJson(tempDir.filePath(QStringLiteral("samples.json")), &jsonDataset);
+        handeye::CalibrationDataset pointJsonDataset;
+        const auto pointJsonWrite = handeye::writeJson(tempDir.filePath(QStringLiteral("point_samples.json")), pointDataset);
+        const auto pointJsonRead = handeye::readJson(tempDir.filePath(QStringLiteral("point_samples.json")), &pointJsonDataset);
         const auto yamlWrite = handeye::writeYaml(tempDir.filePath(QStringLiteral("result.yaml")), dataset);
         const auto txtWrite = results.isEmpty() ? handeye::IoResult{false, {}}
                                                  : handeye::writeResultTxt(tempDir.filePath(QStringLiteral("result.txt")), dataset, results.first());
@@ -295,8 +351,11 @@ int main(int argc, char *argv[])
                                                    : handeye::writeResultPython(tempDir.filePath(QStringLiteral("result.py")), dataset, results.first());
         const bool ioOk = csvWrite.success && csvRead.success && jsonWrite.success && jsonRead.success
                           && yamlWrite.success && txtWrite.success && cppWrite.success && pythonWrite.success
+                          && pointJsonWrite.success && pointJsonRead.success
                           && csvDataset.samples.size() == dataset.samples.size()
-                          && jsonDataset.samples.size() == dataset.samples.size();
+                          && jsonDataset.samples.size() == dataset.samples.size()
+                          && pointJsonDataset.inputMode == handeye::CalibrationInputMode::FixedPoint3D
+                          && pointJsonDataset.pointSamples.size() == pointDataset.pointSamples.size();
         const bool cameraJsonOk = jsonDataset.cameraIntrinsics.valid
                                   && matrix3MaxError(jsonDataset.cameraIntrinsics.cameraMatrix,
                                                      cameraReport.intrinsics.cameraMatrix) < 1e-12
@@ -355,7 +414,9 @@ int main(int argc, char *argv[])
                            && outlierDetectionOk && degeneracyOk && ioOk
                            && imagePoseOk && pairedImportOk && cameraCalibrationOk && cameraOutlierOk
                            && cameraTooFewOk && cameraResolutionOk && cameraJsonOk
-                           && manualApplyOk && manualDuplicateRejected && manualQuaternionOk && uiSmokeOk;
+                           && manualApplyOk && manualDuplicateRejected && manualQuaternionOk
+                           && pointCalibrationOk && fixedTargetOk && qualityOk && nonlinearOk
+                           && manualPointApplyOk && uiSmokeOk;
         smokeStream << "success=" << successCount << "/" << handeye::allMethods().size() << Qt::endl;
         smokeStream << "recommended=" << recommendedCount << ",truth_max_error=" << maxTruthError << Qt::endl;
         smokeStream << "normalization=" << normalizationOk << ",independent_validation=" << independentValidationOk
@@ -371,6 +432,11 @@ int main(int argc, char *argv[])
         smokeStream << "manual_apply=" << manualApplyOk
                     << ",manual_duplicate_rejected=" << manualDuplicateRejected
                     << ",manual_quaternion=" << manualQuaternionOk << Qt::endl;
+        smokeStream << "fixed_point_calibration=" << pointCalibrationOk
+                    << ",fixed_target_pose=" << fixedTargetOk
+                    << ",quality_score=" << qualityOk
+                    << ",nonlinear_optimization=" << nonlinearOk
+                    << ",manual_point_apply=" << manualPointApplyOk << Qt::endl;
         smokeStream << "ui_tabs=" << uiTabsOk << ",ui_actions=" << uiActionsOk
                     << ",ui_camera_page=" << uiCameraPageOk
                     << ",ui_manual_page=" << uiManualPageOk

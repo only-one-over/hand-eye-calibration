@@ -16,6 +16,8 @@
 
 #include <QVector>
 
+#include <algorithm>
+
 namespace handeye {
 
 namespace {
@@ -38,6 +40,21 @@ LengthUnit lengthUnitFromIndex(int index)
 PoseAdapterKind adapterFromIndex(int index)
 {
     return static_cast<PoseAdapterKind>(index);
+}
+
+BoardPattern boardPatternFromIndex(int index)
+{
+    return static_cast<BoardPattern>(index);
+}
+
+ChessboardDetector detectorFromIndex(int index)
+{
+    return static_cast<ChessboardDetector>(index);
+}
+
+PnpMethod pnpFromIndex(int index)
+{
+    return static_cast<PnpMethod>(index);
 }
 
 QVector<double> parseNumbers(const QString &text)
@@ -99,14 +116,33 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
 
     auto *boardGroup = new QGroupBox(QStringLiteral("棋盘格与相机"), this);
     auto *boardForm = new QFormLayout(boardGroup);
+    m_boardPatternCombo = new QComboBox(boardGroup);
+    m_boardPatternCombo->addItems({QStringLiteral("Chessboard"), QStringLiteral("ChArUco"), QStringLiteral("ArUco Grid")});
+    m_detectorCombo = new QComboBox(boardGroup);
+    m_detectorCombo->addItems({QStringLiteral("Auto（SB 优先，Classic 回退）"), QStringLiteral("Classic"), QStringLiteral("SB")});
+    m_pnpCombo = new QComboBox(boardGroup);
+    m_pnpCombo->addItems({QStringLiteral("Auto（ITERATIVE/IPPE 对比）"), QStringLiteral("ITERATIVE"), QStringLiteral("IPPE")});
+    m_dictionaryCombo = new QComboBox(boardGroup);
+    m_dictionaryCombo->addItems({QStringLiteral("DICT_4X4_50"), QStringLiteral("DICT_5X5_100"),
+                                 QStringLiteral("DICT_6X6_250"), QStringLiteral("DICT_7X7_1000")});
     m_boardColumnsEdit = new QLineEdit(QStringLiteral("9"), boardGroup);
     m_boardRowsEdit = new QLineEdit(QStringLiteral("6"), boardGroup);
     m_squareSizeEdit = new QLineEdit(QStringLiteral("25"), boardGroup);
+    m_markerCountXEdit = new QLineEdit(QStringLiteral("5"), boardGroup);
+    m_markerCountYEdit = new QLineEdit(QStringLiteral("7"), boardGroup);
+    m_markerSizeEdit = new QLineEdit(QStringLiteral("18.75"), boardGroup);
     m_cameraMatrixEdit = new QLineEdit(QStringLiteral("1,0,0,0,1,0,0,0,1"), boardGroup);
     m_distortionEdit = new QLineEdit(QStringLiteral("0,0,0,0,0"), boardGroup);
+    boardForm->addRow(QStringLiteral("标定板类型"), m_boardPatternCombo);
+    boardForm->addRow(QStringLiteral("棋盘格检测器"), m_detectorCombo);
+    boardForm->addRow(QStringLiteral("平面 PnP 方法"), m_pnpCombo);
+    boardForm->addRow(QStringLiteral("ArUco 字典"), m_dictionaryCombo);
     boardForm->addRow(QStringLiteral("内角点列数"), m_boardColumnsEdit);
     boardForm->addRow(QStringLiteral("内角点行数"), m_boardRowsEdit);
     boardForm->addRow(QStringLiteral("方格尺寸（mm）"), m_squareSizeEdit);
+    boardForm->addRow(QStringLiteral("ArUco Grid 列数"), m_markerCountXEdit);
+    boardForm->addRow(QStringLiteral("ArUco Grid 行数"), m_markerCountYEdit);
+    boardForm->addRow(QStringLiteral("marker 尺寸（mm）"), m_markerSizeEdit);
     boardForm->addRow(QStringLiteral("相机矩阵（9个数）"), m_cameraMatrixEdit);
     boardForm->addRow(QStringLiteral("畸变参数（k1,k2,p1,p2,k3）"), m_distortionEdit);
     layout->addWidget(boardGroup);
@@ -130,11 +166,16 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
     connectCombo(m_angleUnitCombo);
     connectCombo(m_lengthUnitCombo);
     connectCombo(m_adapterCombo);
+    connectCombo(m_boardPatternCombo);
+    connectCombo(m_detectorCombo);
+    connectCombo(m_pnpCombo);
+    connectCombo(m_dictionaryCombo);
     const auto connectEdit = [this](QLineEdit *edit) {
         connect(edit, &QLineEdit::editingFinished, this, &ParametersPage::emitParametersChanged);
     };
     for (QLineEdit *edit : {m_robotEdit, m_cameraEdit, m_boardColumnsEdit, m_boardRowsEdit,
-                            m_squareSizeEdit, m_cameraMatrixEdit, m_distortionEdit,
+                            m_squareSizeEdit, m_markerCountXEdit, m_markerCountYEdit, m_markerSizeEdit,
+                            m_cameraMatrixEdit, m_distortionEdit,
                             m_passRotationEdit, m_passTranslationEdit})
         connectEdit(edit);
 }
@@ -153,13 +194,27 @@ PoseInputSpec ParametersPage::inputSpec() const
 BoardSpec ParametersPage::boardSpec() const
 {
     BoardSpec board;
+    board.pattern = boardPatternFromIndex(m_boardPatternCombo->currentIndex());
+    board.chessboardDetector = detectorFromIndex(m_detectorCombo->currentIndex());
+    board.pnpMethod = pnpFromIndex(m_pnpCombo->currentIndex());
+    static const int dictionaries[] = {0, 5, 11, 14};
+    board.arucoDictionary = dictionaries[std::clamp(m_dictionaryCombo->currentIndex(), 0, 3)];
     bool okColumns = false;
     bool okRows = false;
     bool okSquare = false;
+    bool okMarkerColumns = false;
+    bool okMarkerRows = false;
+    bool okMarkerSize = false;
     board.innerCornersX = m_boardColumnsEdit->text().trimmed().toInt(&okColumns);
     board.innerCornersY = m_boardRowsEdit->text().trimmed().toInt(&okRows);
     board.squareSizeM = m_squareSizeEdit->text().trimmed().toDouble(&okSquare) / 1000.0;
+    board.markerCountX = m_markerCountXEdit->text().trimmed().toInt(&okMarkerColumns);
+    board.markerCountY = m_markerCountYEdit->text().trimmed().toInt(&okMarkerRows);
+    board.markerSizeM = m_markerSizeEdit->text().trimmed().toDouble(&okMarkerSize) / 1000.0;
     if (!okColumns || !okRows || !okSquare) board.squareSizeM = 0.0;
+    if (!okMarkerColumns) board.markerCountX = 0;
+    if (!okMarkerRows) board.markerCountY = 0;
+    if (!okMarkerSize) board.markerSizeM = 0.0;
     return board;
 }
 
@@ -207,7 +262,9 @@ void ParametersPage::setDatasetParameters(const CalibrationDataset &dataset)
     const QList<QObject *> controls = {m_modeCombo, m_methodCombo, m_adapterCombo,
                                        m_rotationFormatCombo, m_angleUnitCombo, m_lengthUnitCombo,
                                        m_robotEdit, m_cameraEdit, m_boardColumnsEdit, m_boardRowsEdit,
-                                       m_squareSizeEdit, m_cameraMatrixEdit, m_distortionEdit,
+                                       m_squareSizeEdit, m_markerCountXEdit, m_markerCountYEdit, m_markerSizeEdit,
+                                       m_boardPatternCombo, m_detectorCombo, m_pnpCombo, m_dictionaryCombo,
+                                       m_cameraMatrixEdit, m_distortionEdit,
                                        m_passRotationEdit, m_passTranslationEdit};
     for (QObject *control : controls) control->blockSignals(true);
 
@@ -218,9 +275,17 @@ void ParametersPage::setDatasetParameters(const CalibrationDataset &dataset)
     m_lengthUnitCombo->setCurrentIndex(dataset.inputSpec.lengthUnit == LengthUnit::Millimeters ? 1 : 0);
     m_robotEdit->setText(dataset.robotName);
     m_cameraEdit->setText(dataset.cameraName);
+    m_boardPatternCombo->setCurrentIndex(static_cast<int>(dataset.boardSpec.pattern));
+    m_detectorCombo->setCurrentIndex(static_cast<int>(dataset.boardSpec.chessboardDetector));
+    m_pnpCombo->setCurrentIndex(static_cast<int>(dataset.boardSpec.pnpMethod));
+    const QList<int> dictionaries = {0, 5, 11, 14};
+    m_dictionaryCombo->setCurrentIndex(std::max(0, static_cast<int>(dictionaries.indexOf(dataset.boardSpec.arucoDictionary))));
     m_boardColumnsEdit->setText(QString::number(dataset.boardSpec.innerCornersX));
     m_boardRowsEdit->setText(QString::number(dataset.boardSpec.innerCornersY));
     m_squareSizeEdit->setText(QString::number(dataset.boardSpec.squareSizeM * 1000.0, 'g', 12));
+    m_markerCountXEdit->setText(QString::number(dataset.boardSpec.markerCountX));
+    m_markerCountYEdit->setText(QString::number(dataset.boardSpec.markerCountY));
+    m_markerSizeEdit->setText(QString::number(dataset.boardSpec.markerSizeM * 1000.0, 'g', 12));
 
     QStringList cameraValues;
     for (const auto &row : dataset.cameraIntrinsics.cameraMatrix)

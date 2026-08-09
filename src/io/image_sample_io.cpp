@@ -59,6 +59,8 @@ IoResult readRobotPoseCsv(const QString &filePath, CalibrationDataset *dataset,
     }
     if (samples.isEmpty()) return {false, QStringLiteral("No robot pose samples found.")};
     dataset->samples = samples;
+    dataset->pointSamples.clear();
+    dataset->inputMode = CalibrationInputMode::PosePairs;
     dataset->targetPosesReady = false;
     dataset->results.clear();
     return {true, {}};
@@ -124,6 +126,8 @@ IoResult readPoseImageCsv(const QString &filePath, CalibrationDataset *dataset,
 
     if (samples.isEmpty()) return {false, QStringLiteral("No paired pose-image samples found.")};
     dataset->samples = samples;
+    dataset->pointSamples.clear();
+    dataset->inputMode = CalibrationInputMode::PosePairs;
     dataset->targetPosesReady = false;
     dataset->results.clear();
     return {true, {}};

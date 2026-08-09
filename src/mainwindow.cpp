@@ -105,8 +105,8 @@ void MainWindow::connectSignals()
             this, &MainWindow::onClearCameraCalibrationImages);
     connect(m_cameraCalibrationPage, &CameraCalibrationPage::goParametersRequested,
             this, [this] { navigateToPage(ParametersPageIndex); });
-    connect(m_manualPosePage, &ManualPosePage::applyRequested,
-            this, &MainWindow::onApplyManualPoseInputs);
+    connect(m_manualPosePage, &ManualPosePage::applyPointRequested,
+            this, &MainWindow::onApplyManualPointInputs);
     connect(m_manualPosePage, &ManualPosePage::goParametersRequested,
             this, [this] { navigateToPage(ParametersPageIndex); });
     connect(m_manualPosePage, &ManualPosePage::goDataRequested,
@@ -119,6 +119,10 @@ void MainWindow::connectSignals()
             this, &MainWindow::onCalculateSelected);
     connect(m_resultPage, &CalibrationResultPage::calculateAllRequested,
             this, &MainWindow::onCalculateAll);
+    connect(m_resultPage, &CalibrationResultPage::computeFixedTargetRequested,
+            this, &MainWindow::onComputeFixedTarget);
+    connect(m_resultPage, &CalibrationResultPage::optimizeRequested,
+            this, &MainWindow::onOptimizeRecommended);
     connect(m_resultPage, &CalibrationResultPage::importValidationRequested,
             this, &MainWindow::onImportValidationCsv);
     connect(m_resultPage, &CalibrationResultPage::exportRequested,
@@ -250,23 +254,23 @@ void MainWindow::onClearCameraCalibrationImages()
     m_controller->clearCameraCalibrationImages();
 }
 
-void MainWindow::onApplyManualPoseInputs(const QVector<ManualPoseInput> &inputs,
-                                          const PoseInputSpec &spec, bool calculateAll)
+void MainWindow::onApplyManualPointInputs(const QVector<PointSample> &samples,
+                                           const PoseInputSpec &spec, bool calculateAll)
 {
-    if (!m_controller->dataset().samples.isEmpty()) {
+    const CalibrationDataset &dataset = m_controller->dataset();
+    if (!dataset.samples.isEmpty() || !dataset.pointSamples.isEmpty()) {
         const auto answer = QMessageBox::question(
             this, QStringLiteral("替换当前训练数据"),
-            QStringLiteral("当前已有 %1 组训练样本。应用手动位姿后将替换它们，是否继续？")
-                .arg(m_controller->dataset().samples.size()),
+            QStringLiteral("当前已有训练样本。应用 FixedPoint3D 后将替换它们，是否继续？"),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
         if (answer != QMessageBox::Yes) return;
     }
-    if (!m_controller->applyManualPoseInputs(inputs, spec)) return;
+    if (!m_controller->applyManualPointInputs(samples, spec)) return;
     if (calculateAll) {
-        m_controller->calculateAll();
+        m_controller->calculateSelected(CalibrationMethod::PointBased);
         navigateToPage(ResultPageIndex);
     } else {
-        navigateToPage(CurrentDataPageIndex);
+        navigateToPage(ResultPageIndex);
     }
 }
 
@@ -364,6 +368,28 @@ void MainWindow::onCalculateAll()
     navigateToPage(ResultPageIndex);
 }
 
+void MainWindow::onComputeFixedTarget(int referenceSampleId)
+{
+    const CalibrationResult result = selectedResult();
+    if (!result.success) {
+        QMessageBox::information(this, QStringLiteral("无法计算"),
+                                 QStringLiteral("请先生成成功的 PosePairs 标定结果。"));
+        return;
+    }
+    const FixedTargetPoseReport report = m_controller->computeFixedTargetPose(result, referenceSampleId);
+    if (!report.success)
+        QMessageBox::warning(this, QStringLiteral("fixed target pose 计算失败"), report.errors.join('\n'));
+}
+
+void MainWindow::onOptimizeRecommended()
+{
+    syncParametersToController();
+    const CalibrationResult result = m_controller->optimizeRecommendedResult();
+    if (!result.success)
+        QMessageBox::warning(this, QStringLiteral("非线性优化失败"), result.message);
+    navigateToPage(ResultPageIndex);
+}
+
 void MainWindow::onProcessBoardImages()
 {
     syncParametersToController();
@@ -372,17 +398,35 @@ void MainWindow::onProcessBoardImages()
 
 void MainWindow::onSamplesChanged(const QVector<PoseSample> &samples)
 {
-    m_currentDataPage->setSamples(samples);
+    m_resultPage->setReferenceSampleIds(samples);
+    QVector<PoseSample> displaySamples = samples;
+    if (m_controller->dataset().inputMode == CalibrationInputMode::FixedPoint3D) {
+        displaySamples.clear();
+        for (const PointSample &point : m_controller->dataset().pointSamples) {
+            PoseSample display;
+            display.id = point.id;
+            display.label = point.label;
+            display.gripperRotation = point.gripperRotation;
+            display.gripperTranslation = point.gripperTranslation;
+            display.targetTranslation = point.cameraPoint;
+            display.imageStatus = ImageSampleStatus::ManualPose;
+            display.imageMessage = QStringLiteral("FixedPoint3D：相机固定点 XYZ");
+            display.translationResidualM = point.residualM;
+            display.outlier = point.outlier;
+            displaySamples.append(display);
+        }
+    }
+    m_currentDataPage->setSamples(displaySamples);
     int imageCount = 0;
     int targetCount = 0;
-    for (const PoseSample &sample : samples) {
+    for (const PoseSample &sample : displaySamples) {
         if (!sample.imagePath.isEmpty()) ++imageCount;
         if (sample.imageStatus == ImageSampleStatus::PoseEstimated
             || sample.imageStatus == ImageSampleStatus::ManualPose)
             ++targetCount;
     }
-    m_homePage->setSummary(samples.size(), imageCount, targetCount, !m_controller->dataset().results.isEmpty());
-    m_capturePage->setSummary(samples.size(), imageCount, targetCount);
+    m_homePage->setSummary(displaySamples.size(), imageCount, targetCount, !m_controller->dataset().results.isEmpty());
+    m_capturePage->setSummary(displaySamples.size(), imageCount, targetCount);
 }
 
 void MainWindow::updateBatchSummary(const QVector<PoseSample> &samples)
@@ -393,7 +437,10 @@ void MainWindow::updateBatchSummary(const QVector<PoseSample> &samples)
 void MainWindow::onResultsChanged(const QVector<CalibrationResult> &results)
 {
     m_resultPage->setResults(results);
-    m_homePage->setSummary(m_controller->dataset().samples.size(),
+    const int sampleCount = m_controller->dataset().inputMode == CalibrationInputMode::FixedPoint3D
+                                ? m_controller->dataset().pointSamples.size()
+                                : m_controller->dataset().samples.size();
+    m_homePage->setSummary(sampleCount,
                            std::count_if(m_controller->dataset().samples.cbegin(),
                                          m_controller->dataset().samples.cend(),
                                          [](const PoseSample &sample) { return !sample.imagePath.isEmpty(); }),

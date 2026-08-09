@@ -19,8 +19,8 @@ public:
     explicit ManualPosePage(QWidget *parent = nullptr);
 
 signals:
-    void applyRequested(const QVector<ManualPoseInput> &inputs,
-                        const PoseInputSpec &spec, bool calculateAll);
+    void applyPointRequested(const QVector<PointSample> &samples,
+                             const PoseInputSpec &spec, bool calculateAll);
     void goParametersRequested();
     void goDataRequested();
     void goResultsRequested();
@@ -39,10 +39,8 @@ private slots:
 
 private:
     static bool sameSpec(const PoseInputSpec &left, const PoseInputSpec &right);
-    static QStringList rotationLabels(RotationFormat format);
-    static QString formatValue(double value);
 
-    bool readInput(ManualPoseInput *input) const;
+    bool readInput(PointSample *input) const;
     void setStatus(const QString &text, bool warning = false);
     void updateSpecWidgets();
     void updateTable();
@@ -54,17 +52,15 @@ private:
     PoseInputSpec m_pendingSpec;
     bool m_hasDraftSpec = false;
     bool m_hasPendingSpec = false;
-    QVector<ManualPoseInput> m_inputs;
+    QVector<PointSample> m_inputs;
 
     QLabel *m_specSummary = nullptr;
     QLabel *m_status = nullptr;
     QLineEdit *m_idEdit = nullptr;
     QVector<QLineEdit *> m_tcpTranslationEdits;
     QVector<QLineEdit *> m_tcpRotationEdits;
-    QVector<QLineEdit *> m_cameraTranslationEdits;
-    QVector<QLineEdit *> m_cameraRotationEdits;
+    QVector<QLineEdit *> m_cameraPointEdits;
     QVector<QLabel *> m_tcpRotationLabels;
-    QVector<QLabel *> m_cameraRotationLabels;
     QTableWidget *m_table = nullptr;
 };
 
