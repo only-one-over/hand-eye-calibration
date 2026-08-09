@@ -45,6 +45,7 @@ private slots:
     void onExportRequested(const QString &kind);
     void onCalculateSelected();
     void onCalculateAll();
+    void onRunReliabilityPipeline(int bootstrapResamples, double confidenceLevel);
     void onComputeFixedTarget(int referenceSampleId);
     void onOptimizeRecommended();
     void onProcessBoardImages();
@@ -61,6 +62,9 @@ private slots:
     void onCameraCalibrationFinished();
     void onCalculationStarted();
     void onCalculationFinished();
+    void onReliabilityPipelineStarted();
+    void onReliabilityPipelineFinished();
+    void onReliabilityPipelineChanged(const ReliabilityPipelineReport &report);
     void onError(const QString &title, const QString &message);
 
 private:

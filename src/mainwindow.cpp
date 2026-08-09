@@ -123,6 +123,8 @@ void MainWindow::connectSignals()
             this, &MainWindow::onComputeFixedTarget);
     connect(m_resultPage, &CalibrationResultPage::optimizeRequested,
             this, &MainWindow::onOptimizeRecommended);
+    connect(m_resultPage, &CalibrationResultPage::reliabilityPipelineRequested,
+            this, &MainWindow::onRunReliabilityPipeline);
     connect(m_resultPage, &CalibrationResultPage::importValidationRequested,
             this, &MainWindow::onImportValidationCsv);
     connect(m_resultPage, &CalibrationResultPage::exportRequested,
@@ -154,6 +156,12 @@ void MainWindow::connectSignals()
             this, &MainWindow::onCalculationStarted);
     connect(m_controller, &CalibrationController::calculationFinished,
             this, &MainWindow::onCalculationFinished);
+    connect(m_controller, &CalibrationController::reliabilityPipelineStarted,
+            this, &MainWindow::onReliabilityPipelineStarted);
+    connect(m_controller, &CalibrationController::reliabilityPipelineFinished,
+            this, &MainWindow::onReliabilityPipelineFinished);
+    connect(m_controller, &CalibrationController::reliabilityPipelineChanged,
+            this, &MainWindow::onReliabilityPipelineChanged);
     connect(m_controller, &CalibrationController::error,
             this, &MainWindow::onError);
 }
@@ -390,6 +398,13 @@ void MainWindow::onOptimizeRecommended()
     navigateToPage(ResultPageIndex);
 }
 
+void MainWindow::onRunReliabilityPipeline(int bootstrapResamples, double confidenceLevel)
+{
+    syncParametersToController();
+    m_controller->runReliabilityPipeline(bootstrapResamples, confidenceLevel);
+    navigateToPage(ResultPageIndex);
+}
+
 void MainWindow::onProcessBoardImages()
 {
     syncParametersToController();
@@ -437,6 +452,7 @@ void MainWindow::updateBatchSummary(const QVector<PoseSample> &samples)
 void MainWindow::onResultsChanged(const QVector<CalibrationResult> &results)
 {
     m_resultPage->setResults(results);
+    m_resultPage->showPipelineReport(m_controller->dataset().reliabilityPipelineReport);
     const int sampleCount = m_controller->dataset().inputMode == CalibrationInputMode::FixedPoint3D
                                 ? m_controller->dataset().pointSamples.size()
                                 : m_controller->dataset().samples.size();
@@ -510,6 +526,21 @@ void MainWindow::onCalculationStarted()
 void MainWindow::onCalculationFinished()
 {
     navigateToPage(ResultPageIndex);
+}
+
+void MainWindow::onReliabilityPipelineStarted()
+{
+    statusBar()->showMessage(QStringLiteral("正在执行可靠性流水线：质量检查、异常剔除、Huber 和 Bootstrap…"));
+}
+
+void MainWindow::onReliabilityPipelineFinished()
+{
+    navigateToPage(ResultPageIndex);
+}
+
+void MainWindow::onReliabilityPipelineChanged(const ReliabilityPipelineReport &report)
+{
+    m_resultPage->showPipelineReport(report);
 }
 
 void MainWindow::onError(const QString &title, const QString &message)

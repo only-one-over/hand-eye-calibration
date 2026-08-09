@@ -9,6 +9,7 @@
 #include "core/nonlinear_optimizer.h"
 #include "core/point_calibration_service.h"
 #include "core/pose_quality_service.h"
+#include "core/reliability_pipeline_service.h"
 #include "core/synthetic_dataset.h"
 #include "controllers/calibration_controller.h"
 #include "io/dataset_io.h"
@@ -122,6 +123,14 @@ int main(int argc, char *argv[])
     if (translator.load(QLocale::system(), QStringLiteral("hand_eye_calibration"), QStringLiteral("_"),
                        QStringLiteral(":/i18n")))
         app.installTranslator(&translator);
+    if (app.arguments().contains(QStringLiteral("--pipeline-test"))) {
+        const handeye::CalibrationDataset dataset = handeye::makeSyntheticDataset();
+        const auto execution = handeye::ReliabilityPipelineService::run(dataset, 1, 0.95);
+        qInfo() << "pipeline-test" << execution.report.success
+                << execution.report.bootstrapReport.success
+                << execution.report.message;
+        return execution.report.success && execution.report.bootstrapReport.success ? 0 : 1;
+    }
     if (app.arguments().contains(QStringLiteral("--smoke-test"))) {
         QFile smokeLog(QStringLiteral("smoke-result.txt"));
         smokeLog.open(QIODevice::WriteOnly | QIODevice::Text);
@@ -199,6 +208,13 @@ int main(int argc, char *argv[])
         const bool nonlinearOk = nonlinearResult.success
                                  && nonlinearResult.optimizationReport.afterTranslationRmseM
                                         <= nonlinearResult.optimizationReport.beforeTranslationRmseM + 1e-9;
+        const auto pipelineExecution = handeye::ReliabilityPipelineService::run(dataset, 1, 0.95);
+        const bool pipelineOk = pipelineExecution.report.available
+                                && pipelineExecution.report.success
+                                && pipelineExecution.report.bootstrapReport.success
+                                && pipelineExecution.finalResult.success
+                                && pipelineExecution.report.stages.size() >= 8
+                                && pipelineExecution.report.finalSampleCount >= 5;
         handeye::CalibrationController pointController;
         const bool manualPointApplyOk = pointController.applyManualPointInputs(pointDataset.pointSamples,
                                                                                  handeye::PoseInputSpec{})
@@ -337,6 +353,9 @@ int main(int argc, char *argv[])
         handeye::CalibrationDataset jsonSource = dataset;
         jsonSource.cameraIntrinsics = cameraReport.intrinsics;
         jsonSource.cameraCalibrationReport = cameraReport;
+        jsonSource.reliabilityPipelineReport = pipelineExecution.report;
+        jsonSource.bootstrapResamples = 1;
+        jsonSource.bootstrapConfidence = 0.95;
         const auto jsonWrite = handeye::writeJson(tempDir.filePath(QStringLiteral("samples.json")), jsonSource);
         const auto jsonRead = handeye::readJson(tempDir.filePath(QStringLiteral("samples.json")), &jsonDataset);
         handeye::CalibrationDataset pointJsonDataset;
@@ -361,6 +380,10 @@ int main(int argc, char *argv[])
                                                      cameraReport.intrinsics.cameraMatrix) < 1e-12
                                   && jsonDataset.cameraIntrinsics.distortionCoeffs == cameraReport.intrinsics.distortionCoeffs
                                   && jsonDataset.cameraCalibrationReport.success;
+        const bool pipelineJsonOk = jsonDataset.reliabilityPipelineReport.available
+                                    && jsonDataset.reliabilityPipelineReport.bootstrapReport.success
+                                    && jsonDataset.reliabilityPipelineReport.stages.size()
+                                           == pipelineExecution.report.stages.size();
 
         handeye::MainWindow smokeWindow;
         const auto *tabs = smokeWindow.findChild<QTabWidget *>(QStringLiteral("mainTabs"));
@@ -383,7 +406,8 @@ int main(int argc, char *argv[])
                                  && hasButton(QStringLiteral("开始相机标定"))
                                  && hasButton(QStringLiteral("应用到当前标定数据"))
                                  && hasButton(QStringLiteral("应用并计算五种算法"))
-                                 && hasButton(QStringLiteral("五种算法自动比较并推荐"));
+                                 && hasButton(QStringLiteral("五种算法自动比较并推荐"))
+                                 && hasButton(QStringLiteral("执行完整可靠性流水线"));
         auto *cameraPage = smokeWindow.findChild<handeye::CameraCalibrationPage *>();
         if (cameraPage) {
             cameraPage->setBoardSpec(cameraBoard);
@@ -400,7 +424,10 @@ int main(int argc, char *argv[])
         const bool uiDataOk = currentDataPage && currentDataTable && currentDataTable->model()
                               && currentDataTable->model()->rowCount() == dataset.samples.size();
         auto *resultPage = smokeWindow.findChild<handeye::CalibrationResultPage *>();
-        if (resultPage) resultPage->setResults(results);
+        if (resultPage) {
+            resultPage->setResults(results);
+            resultPage->showPipelineReport(pipelineExecution.report);
+        }
         const auto *resultMatrix = smokeWindow.findChild<QPlainTextEdit *>(QStringLiteral("resultMatrix"));
         const bool uiResultOk = resultPage && resultMatrix
                                 && resultMatrix->toPlainText().contains(QStringLiteral("camera→gripper"));
@@ -416,7 +443,7 @@ int main(int argc, char *argv[])
                            && cameraTooFewOk && cameraResolutionOk && cameraJsonOk
                            && manualApplyOk && manualDuplicateRejected && manualQuaternionOk
                            && pointCalibrationOk && fixedTargetOk && qualityOk && nonlinearOk
-                           && manualPointApplyOk && uiSmokeOk;
+                           && manualPointApplyOk && pipelineOk && pipelineJsonOk && uiSmokeOk;
         smokeStream << "success=" << successCount << "/" << handeye::allMethods().size() << Qt::endl;
         smokeStream << "recommended=" << recommendedCount << ",truth_max_error=" << maxTruthError << Qt::endl;
         smokeStream << "normalization=" << normalizationOk << ",independent_validation=" << independentValidationOk
@@ -437,6 +464,10 @@ int main(int argc, char *argv[])
                     << ",quality_score=" << qualityOk
                     << ",nonlinear_optimization=" << nonlinearOk
                     << ",manual_point_apply=" << manualPointApplyOk << Qt::endl;
+        smokeStream << "reliability_pipeline=" << pipelineOk
+                    << ",pipeline_json=" << pipelineJsonOk
+                    << ",bootstrap=" << pipelineExecution.report.bootstrapReport.success
+                    << ",removed=" << pipelineExecution.report.autoRemovedCount << Qt::endl;
         smokeStream << "ui_tabs=" << uiTabsOk << ",ui_actions=" << uiActionsOk
                     << ",ui_camera_page=" << uiCameraPageOk
                     << ",ui_manual_page=" << uiManualPageOk

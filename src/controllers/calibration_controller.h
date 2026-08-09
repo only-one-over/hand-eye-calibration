@@ -51,6 +51,8 @@ public:
     // Calculation (async)
     void calculateSelected(CalibrationMethod method);
     void calculateAll();
+    void runReliabilityPipeline(int bootstrapResamples = -1,
+                                double confidenceLevel = -1.0);
 
     // Input spec update
     void updateInputSpec(const PoseInputSpec &spec, const QString &robot, const QString &camera);
@@ -69,6 +71,9 @@ signals:
     void inputSpecChanged(const QString &robot, const QString &camera);
     void calculationStarted();
     void calculationFinished();
+    void reliabilityPipelineStarted();
+    void reliabilityPipelineFinished();
+    void reliabilityPipelineChanged(const ReliabilityPipelineReport &report);
     void imageProcessingFinished(int processed, int succeeded);
     void cameraCalibrationChanged(const CameraCalibrationReport &report);
     void cameraCalibrationStarted();

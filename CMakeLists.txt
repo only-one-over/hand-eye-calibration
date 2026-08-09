@@ -72,6 +72,8 @@ set(PROJECT_SOURCES
     src/core/pose_quality_service.h
     src/core/nonlinear_optimizer.cpp
     src/core/nonlinear_optimizer.h
+    src/core/reliability_pipeline_service.cpp
+    src/core/reliability_pipeline_service.h
     src/core/point_calibration_service.cpp
     src/core/point_calibration_service.h
     src/core/pose_conversion.cpp

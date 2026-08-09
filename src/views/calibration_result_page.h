@@ -8,6 +8,7 @@ class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
+class QDoubleSpinBox;
 class QTableWidget;
 class QTableView;
 
@@ -28,6 +29,7 @@ signals:
     void calculateAllRequested();
     void computeFixedTargetRequested(int referenceSampleId);
     void optimizeRequested();
+    void reliabilityPipelineRequested(int bootstrapResamples, double confidenceLevel);
     void importValidationRequested();
     void exportRequested(const QString &kind);
 
@@ -38,6 +40,7 @@ public slots:
     void showMatrix(const CalibrationResult &result);
     void appendLog(const QString &message);
     void clearResults();
+    void showPipelineReport(const ReliabilityPipelineReport &report);
 
 private slots:
     void onResultClicked(const QModelIndex &index);
@@ -49,7 +52,11 @@ private:
     QPlainTextEdit *m_matrix = nullptr;
     QPlainTextEdit *m_log = nullptr;
     QSpinBox *m_referenceSample = nullptr;
+    QSpinBox *m_bootstrapResamples = nullptr;
+    QDoubleSpinBox *m_bootstrapConfidence = nullptr;
     QTableWidget *m_poseReportTable = nullptr;
+    QTableWidget *m_pipelineTable = nullptr;
+    QLabel *m_uncertainty = nullptr;
 };
 
 } // namespace handeye
