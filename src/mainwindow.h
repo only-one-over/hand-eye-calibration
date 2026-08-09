@@ -1,16 +1,22 @@
 #pragma once
 
 #include "domain/calibration_types.h"
-#include "models/calibration_session_model.h"
 
 #include <QMainWindow>
+#include <QVector>
 
-class QComboBox;
-class QLineEdit;
-class QPlainTextEdit;
-class QTableView;
+class QTabWidget;
 
 namespace handeye {
+
+class CalibrationController;
+class HomePage;
+class CapturePage;
+class ParametersPage;
+class CameraCalibrationPage;
+class ManualPosePage;
+class CurrentDataPage;
+class CalibrationResultPage;
 
 class MainWindow : public QMainWindow
 {
@@ -20,34 +26,66 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
 
 private slots:
-    void newDataset();
-    void generateDemo();
-    void importCsv();
-    void importJson();
-    void exportCsv();
-    void exportJson();
-    void deleteSelectedSamples();
-    void calculateSelected();
-    void calculateAll();
-    void showSelectedResult(const QModelIndex &index);
+    void onNewDataset();
+    void onGenerateDemo();
+    void onImportRobotPoseCsv();
+    void onImportCalibrationImages();
+    void onSelectCameraCalibrationImages();
+    void onDetectCameraCalibrationImages();
+    void onCalibrateCameraIntrinsics();
+    void onApplyCameraIntrinsics();
+    void onClearCameraCalibrationImages();
+    void onApplyManualPointInputs(const QVector<PointSample> &samples,
+                                  const PoseInputSpec &spec, bool calculateAll);
+    void onImportPoseImageCsv();
+    void onImportProcessedCsv();
+    void onImportValidationCsv();
+    void onImportJson();
+    void onExportProcessedCsv();
+    void onExportRequested(const QString &kind);
+    void onCalculateSelected();
+    void onCalculateAll();
+    void onComputeFixedTarget(int referenceSampleId);
+    void onOptimizeRecommended();
+    void onProcessBoardImages();
+    void onSamplesChanged(const QVector<PoseSample> &samples);
+    void onResultsChanged(const QVector<CalibrationResult> &results);
+    void onReliabilityChanged(const CalibrationResult &result);
+    void onMatrixChanged(const CalibrationResult &result);
+    void onStatusChanged(const QString &text);
+    void onLogMessage(const QString &message);
+    void onInputSpecChanged(const QString &robot, const QString &camera);
+    void onImageProcessingFinished(int processed, int succeeded);
+    void onCameraCalibrationChanged(const CameraCalibrationReport &report);
+    void onCameraCalibrationStarted();
+    void onCameraCalibrationFinished();
+    void onCalculationStarted();
+    void onCalculationFinished();
+    void onError(const QString &title, const QString &message);
 
 private:
-    void setupUi();
-    void syncSamplesToView();
-    void appendLog(const QString &message);
-    CalibrationMethod selectedMethod() const;
-    void updateMatrixView(const CalibrationResult &result);
+    enum Page { HomePageIndex = 0, CapturePageIndex = 1, ParametersPageIndex = 2,
+                CameraCalibrationPageIndex = 3, ManualPosePageIndex = 4,
+                CurrentDataPageIndex = 5, ResultPageIndex = 6 };
 
-    CalibrationDataset m_dataset;
-    SampleTableModel *m_sampleModel = nullptr;
-    ResultTableModel *m_resultModel = nullptr;
-    QTableView *m_sampleTable = nullptr;
-    QTableView *m_resultTable = nullptr;
-    QComboBox *m_methodCombo = nullptr;
-    QComboBox *m_modeCombo = nullptr;
-    QLineEdit *m_unitEdit = nullptr;
-    QPlainTextEdit *m_matrixView = nullptr;
-    QPlainTextEdit *m_logView = nullptr;
+    void buildPages();
+    void buildMenuBar();
+    void connectSignals();
+    void syncParametersToController();
+    void navigateToPage(int index);
+    void updateBatchSummary(const QVector<PoseSample> &samples);
+    bool confirmPairing(const QString &operation);
+    CalibrationResult selectedResult() const;
+
+    QTabWidget *m_tabs = nullptr;
+    HomePage *m_homePage = nullptr;
+    CapturePage *m_capturePage = nullptr;
+    ParametersPage *m_parametersPage = nullptr;
+    CameraCalibrationPage *m_cameraCalibrationPage = nullptr;
+    ManualPosePage *m_manualPosePage = nullptr;
+    CurrentDataPage *m_currentDataPage = nullptr;
+    CalibrationResultPage *m_resultPage = nullptr;
+    CalibrationController *m_controller = nullptr;
 };
 
 } // namespace handeye

@@ -9,10 +9,12 @@ namespace handeye {
 CalibrationDataset makeSyntheticDataset(int count)
 {
     CalibrationDataset dataset;
-    dataset.translationUnit = QStringLiteral("m");
+    dataset.targetPosesReady = true;
     const Vector3 cameraRotation{0.18, -0.22, 0.12};
     const Vector3 cameraTranslation{0.08, -0.04, 0.16};
     const cv::Matx44d cameraToGripper = matrix::fromRodrigues(cameraRotation, cameraTranslation);
+    dataset.hasGroundTruth = true;
+    dataset.groundTruthCameraToGripper = matrix::toArray(cameraToGripper);
 
     for (int i = 0; i < std::max(3, count); ++i) {
         const double phase = static_cast<double>(i + 1);
