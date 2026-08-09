@@ -131,6 +131,7 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
     m_markerCountXEdit = new QLineEdit(QStringLiteral("5"), boardGroup);
     m_markerCountYEdit = new QLineEdit(QStringLiteral("7"), boardGroup);
     m_markerSizeEdit = new QLineEdit(QStringLiteral("18.75"), boardGroup);
+    m_markerSeparationEdit = new QLineEdit(QStringLiteral("5"), boardGroup);
     m_cameraMatrixEdit = new QLineEdit(QStringLiteral("1,0,0,0,1,0,0,0,1"), boardGroup);
     m_distortionEdit = new QLineEdit(QStringLiteral("0,0,0,0,0"), boardGroup);
     boardForm->addRow(QStringLiteral("标定板类型"), m_boardPatternCombo);
@@ -143,6 +144,7 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
     boardForm->addRow(QStringLiteral("ArUco Grid 列数"), m_markerCountXEdit);
     boardForm->addRow(QStringLiteral("ArUco Grid 行数"), m_markerCountYEdit);
     boardForm->addRow(QStringLiteral("marker 尺寸（mm）"), m_markerSizeEdit);
+    boardForm->addRow(QStringLiteral("marker 间距（mm）"), m_markerSeparationEdit);
     boardForm->addRow(QStringLiteral("相机矩阵（9个数）"), m_cameraMatrixEdit);
     boardForm->addRow(QStringLiteral("畸变参数（k1,k2,p1,p2,k3）"), m_distortionEdit);
     layout->addWidget(boardGroup);
@@ -175,6 +177,7 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
     };
     for (QLineEdit *edit : {m_robotEdit, m_cameraEdit, m_boardColumnsEdit, m_boardRowsEdit,
                             m_squareSizeEdit, m_markerCountXEdit, m_markerCountYEdit, m_markerSizeEdit,
+                            m_markerSeparationEdit,
                             m_cameraMatrixEdit, m_distortionEdit,
                             m_passRotationEdit, m_passTranslationEdit})
         connectEdit(edit);
@@ -185,6 +188,16 @@ PoseInputSpec ParametersPage::inputSpec() const
     PoseInputSpec spec;
     spec.adapter = adapterFromIndex(m_adapterCombo->currentIndex());
     spec.rotationFormat = rotationFormatFromIndex(m_rotationFormatCombo->currentIndex());
+    if (spec.adapter == PoseAdapterKind::Kuka)
+        spec.convention = PoseConvention::KukaAbcZyx;
+    else if (spec.adapter == PoseAdapterKind::Fanuc)
+        spec.convention = PoseConvention::FanucWprXyz;
+    else if (spec.rotationFormat == RotationFormat::EulerXYZ)
+        spec.convention = PoseConvention::EulerXYZIntrinsic;
+    else if (spec.rotationFormat == RotationFormat::RPY)
+        spec.convention = PoseConvention::RpyZyx;
+    else
+        spec.convention = PoseConvention::Generic;
     spec.angleUnit = angleUnitFromIndex(m_angleUnitCombo->currentIndex());
     spec.lengthUnit = lengthUnitFromIndex(m_lengthUnitCombo->currentIndex());
     spec.direction = PoseDirection::GripperToBase;
@@ -205,16 +218,19 @@ BoardSpec ParametersPage::boardSpec() const
     bool okMarkerColumns = false;
     bool okMarkerRows = false;
     bool okMarkerSize = false;
+    bool okMarkerSeparation = false;
     board.innerCornersX = m_boardColumnsEdit->text().trimmed().toInt(&okColumns);
     board.innerCornersY = m_boardRowsEdit->text().trimmed().toInt(&okRows);
     board.squareSizeM = m_squareSizeEdit->text().trimmed().toDouble(&okSquare) / 1000.0;
     board.markerCountX = m_markerCountXEdit->text().trimmed().toInt(&okMarkerColumns);
     board.markerCountY = m_markerCountYEdit->text().trimmed().toInt(&okMarkerRows);
     board.markerSizeM = m_markerSizeEdit->text().trimmed().toDouble(&okMarkerSize) / 1000.0;
+    board.markerSeparationM = m_markerSeparationEdit->text().trimmed().toDouble(&okMarkerSeparation) / 1000.0;
     if (!okColumns || !okRows || !okSquare) board.squareSizeM = 0.0;
     if (!okMarkerColumns) board.markerCountX = 0;
     if (!okMarkerRows) board.markerCountY = 0;
     if (!okMarkerSize) board.markerSizeM = 0.0;
+    if (!okMarkerSeparation) board.markerSeparationM = -1.0;
     return board;
 }
 
@@ -263,6 +279,7 @@ void ParametersPage::setDatasetParameters(const CalibrationDataset &dataset)
                                        m_rotationFormatCombo, m_angleUnitCombo, m_lengthUnitCombo,
                                        m_robotEdit, m_cameraEdit, m_boardColumnsEdit, m_boardRowsEdit,
                                        m_squareSizeEdit, m_markerCountXEdit, m_markerCountYEdit, m_markerSizeEdit,
+                                       m_markerSeparationEdit,
                                        m_boardPatternCombo, m_detectorCombo, m_pnpCombo, m_dictionaryCombo,
                                        m_cameraMatrixEdit, m_distortionEdit,
                                        m_passRotationEdit, m_passTranslationEdit};
@@ -286,6 +303,7 @@ void ParametersPage::setDatasetParameters(const CalibrationDataset &dataset)
     m_markerCountXEdit->setText(QString::number(dataset.boardSpec.markerCountX));
     m_markerCountYEdit->setText(QString::number(dataset.boardSpec.markerCountY));
     m_markerSizeEdit->setText(QString::number(dataset.boardSpec.markerSizeM * 1000.0, 'g', 12));
+    m_markerSeparationEdit->setText(QString::number(dataset.boardSpec.markerSeparationM * 1000.0, 'g', 12));
 
     QStringList cameraValues;
     for (const auto &row : dataset.cameraIntrinsics.cameraMatrix)

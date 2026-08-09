@@ -148,14 +148,16 @@ int main(int argc, char *argv[])
                 maxTruthError = std::max(maxTruthError, matrixMaxError(result.cameraToGripper,
                                                                          dataset.groundTruthCameraToGripper));
             smokeStream << handeye::methodName(result.method) << "|" << result.success << "|"
-                        << result.message << "|rmse=" << result.trainingReport.rotationRmseDeg
-                        << "," << result.trainingReport.translationRmseM << Qt::endl;
+                        << result.message << "|rmse=" << result.axXbReport.rotationRmseDeg
+                        << "," << result.axXbReport.translationRmseM << Qt::endl;
         }
 
+        handeye::PoseInputSpec degreeMmSpec;
+        degreeMmSpec.rotationFormat = handeye::RotationFormat::Rodrigues;
+        degreeMmSpec.angleUnit = handeye::AngleUnit::Degrees;
+        degreeMmSpec.lengthUnit = handeye::LengthUnit::Millimeters;
         const auto degreeMm = handeye::pose::normalize({0.0, 0.0, 90.0, 0.0}, {1000.0, 0.0, 0.0},
-                                                       {handeye::RotationFormat::Rodrigues,
-                                                        handeye::AngleUnit::Degrees,
-                                                        handeye::LengthUnit::Millimeters});
+                                                       degreeMmSpec);
         const bool normalizationOk = degreeMm.success
                                       && std::abs(degreeMm.rotation[2] - CV_PI / 2.0) < 1e-10
                                       && std::abs(degreeMm.translation[0] - 1.0) < 1e-10;
@@ -171,7 +173,7 @@ int main(int argc, char *argv[])
         outlierDataset.samples.last().targetTranslation[0] += 0.2;
         const auto outlierResult = handeye::CalibrationService::calibrate(outlierDataset,
                                                                            handeye::CalibrationMethod::Tsai);
-        const bool outlierDetectionOk = outlierResult.trainingReport.outlierCount > 0;
+        const bool outlierDetectionOk = outlierResult.axXbReport.outlierCount > 0;
 
         handeye::CalibrationDataset degenerateDataset = dataset;
         for (handeye::PoseSample &sample : degenerateDataset.samples)

@@ -8,13 +8,13 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent LinguistTools)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent LinguistTools Test)
 
 # Qt Creator may keep a stale OpenCV_DIR pointing at C:/opencv/build. The
 # Windows package in that directory is not compatible with the installed
 # MSVC toolchain; the actual vc16 package is under x64/vc16/lib.
 set(HAND_EYE_OPENCV_DIR "" CACHE PATH "OpenCVConfig.cmake directory")
-find_package(OpenCV CONFIG QUIET COMPONENTS core imgproc imgcodecs calib3d)
+find_package(OpenCV CONFIG QUIET COMPONENTS core imgproc imgcodecs calib3d objdetect)
 if(NOT OpenCV_FOUND)
     set(_hand_eye_opencv_fallback "")
     if(HAND_EYE_OPENCV_DIR AND EXISTS "${HAND_EYE_OPENCV_DIR}/OpenCVConfig.cmake")
@@ -26,7 +26,7 @@ if(NOT OpenCV_FOUND)
     if(_hand_eye_opencv_fallback)
         unset(OpenCV_DIR CACHE)
         set(OpenCV_DIR "${_hand_eye_opencv_fallback}" CACHE PATH "OpenCVConfig.cmake directory" FORCE)
-        find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d)
+        find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d objdetect)
     else()
         message(FATAL_ERROR
             "OpenCV was not found or its package is incompatible. "
@@ -72,6 +72,8 @@ set(PROJECT_SOURCES
     src/core/pose_quality_service.h
     src/core/nonlinear_optimizer.cpp
     src/core/nonlinear_optimizer.h
+    src/core/normalized_huber.cpp
+    src/core/normalized_huber.h
     src/core/reliability_pipeline_service.cpp
     src/core/reliability_pipeline_service.h
     src/core/point_calibration_service.cpp
@@ -108,6 +110,51 @@ set_target_properties(hand_eye_calibration PROPERTIES
     MACOSX_BUNDLE TRUE
     WIN32_EXECUTABLE TRUE
 )
+
+enable_testing()
+
+set(HAND_EYE_TEST_SOURCES
+    tests/handeye_unit_test.cpp
+    src/controllers/calibration_controller.cpp
+    src/domain/calibration_types.h
+    src/core/matrix_utils.cpp
+    src/core/matrix_utils.h
+    src/core/board_pose_estimator.cpp
+    src/core/board_pose_estimator.h
+    src/core/camera_calibration_service.cpp
+    src/core/camera_calibration_service.h
+    src/core/pose_quality_service.cpp
+    src/core/pose_quality_service.h
+    src/core/nonlinear_optimizer.cpp
+    src/core/nonlinear_optimizer.h
+    src/core/normalized_huber.cpp
+    src/core/normalized_huber.h
+    src/core/reliability_pipeline_service.cpp
+    src/core/reliability_pipeline_service.h
+    src/core/point_calibration_service.cpp
+    src/core/point_calibration_service.h
+    src/core/pose_conversion.cpp
+    src/core/pose_conversion.h
+    src/core/dataset_validator.cpp
+    src/core/dataset_validator.h
+    src/core/synthetic_dataset.cpp
+    src/core/synthetic_dataset.h
+    src/core/calibration_service.cpp
+    src/core/calibration_service.h
+    src/io/dataset_io.cpp
+    src/io/dataset_io.h
+    src/io/image_sample_io.cpp
+    src/io/image_sample_io.h
+    src/io/pose_adapter.cpp
+    src/io/pose_adapter.h
+)
+
+qt_add_executable(handeye_tests ${HAND_EYE_TEST_SOURCES})
+target_include_directories(handeye_tests PRIVATE src)
+target_link_libraries(handeye_tests PRIVATE Qt6::Test Qt6::Widgets Qt6::Concurrent ${OpenCV_LIBS})
+add_test(NAME handeye_unit_tests COMMAND handeye_tests)
+add_test(NAME handeye_smoke_test COMMAND hand_eye_calibration --smoke-test -platform offscreen)
+add_test(NAME handeye_pipeline_test COMMAND hand_eye_calibration --pipeline-test -platform offscreen)
 
 include(GNUInstallDirs)
 install(TARGETS hand_eye_calibration

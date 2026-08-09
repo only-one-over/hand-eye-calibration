@@ -133,3 +133,19 @@ docs/plans/   功能设计与实施计划
 结果页提供 fixed target pose、每个 sample 到鲁棒均值或指定 reference 的误差、Huber 非线性精修、优化前后 RMSE，以及由样本数量、旋转幅度、旋转轴和空间分布组成的 Pose Quality Score。
 
 标定板支持 Chessboard（`findChessboardCornersSB` 优先、Classic 回退）、ChArUco 和 ArUco Grid。平面 PnP 会比较 `SOLVEPNP_ITERATIVE` 与 `SOLVEPNP_IPPE`，并保存检测器、PnP 方法和误差摘要。
+## Reliability pipeline
+
+The reliability run is ordered as:
+
+`motion excitation -> PnP quality -> five algorithms -> AX=XB -> Fixed Target -> single-sample outlier verification -> normalized Huber -> bootstrap`.
+
+All pose values are normalized internally to Rodrigues radians and meters. The input directions are fixed as ``gripper->base`` and ``target->camera``; the exported hand-eye result is ``camera->gripper``.
+
+Normalized Huber uses a 1 degree rotation scale and a 1 mm translation scale. Bootstrap reports ``successRate`` in ``[0,1]``, while ``confidenceLevel`` controls the uncertainty interval. The result metadata keeps the AX=XB report separate from the Fixed Target report.
+
+Run the local checks after configuring the project:
+
+```powershell
+cmake --build build --config Debug
+ctest --test-dir build -C Debug --output-on-failure
+```

@@ -67,7 +67,7 @@ bool makeViewPoints(const CameraCalibrationSample &sample,
     }
     const cv::aruco::GridBoard gridBoard(
         cv::Size(board.markerCountX, board.markerCountY), static_cast<float>(board.markerSizeM),
-        static_cast<float>(board.markerSizeM * 0.25), dictionary);
+        static_cast<float>(board.markerSeparationM), dictionary);
     std::vector<std::vector<cv::Point2f>> markerCorners;
     for (const QVector<Vector2> &marker : sample.markerCorners) markerCorners.push_back(toCvPoints(marker));
     std::vector<int> ids;
@@ -230,6 +230,22 @@ CameraCalibrationReport calibrateDetected(CameraCalibrationReport report,
     report.passed = false;
     report.errors.clear();
     report.message.clear();
+
+    const bool validGeometry = board.pattern == BoardPattern::Chessboard
+                                   ? board.innerCornersX >= 2 && board.innerCornersY >= 2
+                                         && board.squareSizeM > 0.0
+                                   : board.pattern == BoardPattern::Charuco
+                                         ? board.innerCornersX >= 1 && board.innerCornersY >= 1
+                                               && board.squareSizeM > 0.0 && board.markerSizeM > 0.0
+                                               && board.markerSizeM < board.squareSizeM
+                                         : board.markerCountX >= 1 && board.markerCountY >= 1
+                                               && board.markerSizeM > 0.0
+                                               && board.markerSeparationM >= 0.0;
+    if (!validGeometry) {
+        report.errors.append(QStringLiteral("标定板几何参数无效，请检查网格尺寸、marker 尺寸和间距。"));
+        report.message = report.errors.last();
+        return report;
+    }
 
     QVector<int> validIndices;
     for (int index = 0; index < report.samples.size(); ++index) {

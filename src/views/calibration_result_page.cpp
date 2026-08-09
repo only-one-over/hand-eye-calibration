@@ -113,7 +113,15 @@ CalibrationResultPage::CalibrationResultPage(QWidget *parent) : QWidget(parent)
     auto *details = new QHBoxLayout;
     m_reliability = new QLabel(QStringLiteral("可靠性报告将在计算后显示。"), this);
     m_reliability->setWordWrap(true);
-    details->addWidget(m_reliability, 1);
+    auto *reportColumn = new QVBoxLayout;
+    m_axXbReport = new QLabel(QStringLiteral("AX=XB 一致性：尚未计算。"), this);
+    m_axXbReport->setWordWrap(true);
+    m_fixedTargetReport = new QLabel(QStringLiteral("Fixed Target 一致性：尚未计算。"), this);
+    m_fixedTargetReport->setWordWrap(true);
+    reportColumn->addWidget(m_axXbReport);
+    reportColumn->addWidget(m_fixedTargetReport);
+    reportColumn->addWidget(m_reliability);
+    details->addLayout(reportColumn, 1);
     m_matrix = new QPlainTextEdit(this);
     m_matrix->setObjectName(QStringLiteral("resultMatrix"));
     m_matrix->setReadOnly(true);
@@ -193,17 +201,46 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
 {
     if (!result.success) {
         m_reliability->setText(result.message.isEmpty() ? QStringLiteral("尚未生成可靠性报告。") : result.message);
+        m_axXbReport->setText(QStringLiteral("AX=XB 一致性：尚未计算。"));
+        m_fixedTargetReport->setText(QStringLiteral("Fixed Target 一致性：尚未计算。"));
         return;
     }
-    const ReliabilityReport &training = result.trainingReport;
+    const AxXbReport &axXb = result.axXbReport;
+    m_axXbReport->setText(QStringLiteral("AX=XB 一致性\n旋转 RMSE：%1° | 平移 RMSE：%2 m\n平均：%3° / %4 m | 最大：%5° / %6 m\n异常样本：%7 | 状态：%8")
+                              .arg(axXb.rotationRmseDeg, 0, 'f', 5)
+                              .arg(axXb.translationRmseM, 0, 'f', 7)
+                              .arg(axXb.rotationMeanDeg, 0, 'f', 5)
+                              .arg(axXb.translationMeanM, 0, 'f', 7)
+                              .arg(axXb.rotationMaxDeg, 0, 'f', 5)
+                              .arg(axXb.translationMaxM, 0, 'f', 7)
+                              .arg(axXb.outlierCount)
+                              .arg(axXb.passed ? QStringLiteral("通过") : QStringLiteral("未通过")));
+    if (result.fixedTargetReport.available) {
+        m_fixedTargetReport->setText(QStringLiteral("Fixed Target 一致性\n旋转 RMSE：%1° | 平移 RMSE：%2 m\n平均：%3° / %4 m | 最大：%5° / %6 m\n异常样本：%7")
+                                         .arg(result.fixedTargetReport.rotationRmseDeg, 0, 'f', 5)
+                                         .arg(result.fixedTargetReport.translationRmseM, 0, 'f', 7)
+                                         .arg(result.fixedTargetReport.rotationMeanDeg, 0, 'f', 5)
+                                         .arg(result.fixedTargetReport.translationMeanM, 0, 'f', 7)
+                                         .arg(result.fixedTargetReport.rotationMaxDeg, 0, 'f', 5)
+                                         .arg(result.fixedTargetReport.translationMaxM, 0, 'f', 7)
+                                         .arg(result.fixedTargetReport.outlierCount));
+    } else if (result.fixedPointReport.available) {
+        m_fixedTargetReport->setText(QStringLiteral("FixedPoint3D 固定点一致性\nRMSE：%1 m | 平均：%2 m | 最大：%3 m\n异常样本：%4")
+                                         .arg(result.fixedPointReport.rmseM, 0, 'f', 7)
+                                         .arg(result.fixedPointReport.meanErrorM, 0, 'f', 7)
+                                         .arg(result.fixedPointReport.maxErrorM, 0, 'f', 7)
+                                         .arg(result.fixedPointReport.outlierCount));
+    } else {
+        m_fixedTargetReport->setText(QStringLiteral("Fixed Target 一致性：尚未计算。"));
+    }
     QString text = QStringLiteral("输入模式：%1\n训练：旋转 RMSE %2° | 平移 RMSE %3 m\n平均：%4° / %5 m\n最大：%6° / %7 m\n异常样本：%8\n状态：%9")
                        .arg(result.fixedPointReport.available ? QStringLiteral("FixedPoint3D")
                                                                : QStringLiteral("PosePairs"))
-                       .arg(training.rotationRmseDeg, 0, 'f', 5).arg(training.translationRmseM, 0, 'f', 7)
-                       .arg(training.rotationMeanDeg, 0, 'f', 5).arg(training.translationMeanM, 0, 'f', 7)
-                       .arg(training.rotationMaxDeg, 0, 'f', 5).arg(training.translationMaxM, 0, 'f', 7)
-                       .arg(training.outlierCount)
-                       .arg(training.passed ? QStringLiteral("通过") : QStringLiteral("未通过"));
+                       .arg(axXb.rotationRmseDeg, 0, 'f', 5).arg(axXb.translationRmseM, 0, 'f', 7)
+                       .arg(axXb.rotationMeanDeg, 0, 'f', 5).arg(axXb.translationMeanM, 0, 'f', 7)
+                       .arg(axXb.rotationMaxDeg, 0, 'f', 5).arg(axXb.translationMaxM, 0, 'f', 7)
+                       .arg(axXb.outlierCount)
+                       .arg(axXb.passed ? QStringLiteral("通过") : QStringLiteral("未通过"));
     if (result.fixedPointReport.available) {
         text += QStringLiteral("\n固定点：RMSE %1 m | 平均 %2 m | 最大 %3 m | 异常 %4")
                     .arg(result.fixedPointReport.rmseM, 0, 'f', 6)
@@ -231,10 +268,10 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
                     .arg(result.optimizationReport.converged ? QStringLiteral("已收敛") : QStringLiteral("达到停止条件"));
     }
     if (result.bootstrapReport.available) {
-        text += QStringLiteral("\nBootstrap：%1/%2 成功，置信度评分 %3/100，旋转不确定度 %4°，平移不确定度 %5 m")
+        text += QStringLiteral("\nBootstrap：%1/%2 成功，Bootstrap 成功率 %3%，旋转不确定度 %4°，平移不确定度 %5 m")
                     .arg(result.bootstrapReport.successfulResamples)
                     .arg(result.bootstrapReport.requestedResamples)
-                    .arg(result.bootstrapReport.confidenceScore, 0, 'f', 1)
+                    .arg(result.bootstrapReport.successRate * 100.0, 0, 'f', 1)
                     .arg(result.bootstrapReport.rotationNormStdDeg, 0, 'f', 5)
                     .arg(result.bootstrapReport.translationNormStdM, 0, 'f', 7);
     }
@@ -303,14 +340,14 @@ void CalibrationResultPage::showPipelineReport(const ReliabilityPipelineReport &
     }
     m_uncertainty->setText(
         QStringLiteral("最终矩阵：%1 | 流水线：%2 | 样本 %3 → %4（自动剔除 %5）\n"
-                       "Bootstrap：%6/%7 成功，置信度评分 %8/100\n"
+                       "Bootstrap：%6/%7 成功，Bootstrap 成功率 %8%\n"
                        "旋转标准差：[%9, %10, %11]°，95%% 区间：[%12, %13, %14]° ～ [%15, %16, %17]°\n"
                        "平移标准差：[%18, %19, %20] m，95%% 区间：[%21, %22, %23] m ～ [%24, %25, %26] m")
             .arg(methodName(report.finalMethod))
             .arg(report.passed ? QStringLiteral("通过") : QStringLiteral("有警告"))
             .arg(report.initialSampleCount).arg(report.finalSampleCount).arg(report.autoRemovedCount)
             .arg(bootstrap.successfulResamples).arg(bootstrap.requestedResamples)
-            .arg(bootstrap.confidenceScore, 0, 'f', 1)
+            .arg(bootstrap.successRate * 100.0, 0, 'f', 1)
             .arg(bootstrap.rotationStdDeg[0], 0, 'f', 5)
             .arg(bootstrap.rotationStdDeg[1], 0, 'f', 5)
             .arg(bootstrap.rotationStdDeg[2], 0, 'f', 5)
@@ -355,6 +392,8 @@ void CalibrationResultPage::clearResults()
 {
     m_model->setResults({});
     m_reliability->setText(QStringLiteral("尚未生成可靠性报告。"));
+    if (m_axXbReport) m_axXbReport->setText(QStringLiteral("AX=XB 一致性：尚未计算。"));
+    if (m_fixedTargetReport) m_fixedTargetReport->setText(QStringLiteral("Fixed Target 一致性：尚未计算。"));
     m_matrix->clear();
     if (m_pipelineTable) m_pipelineTable->setRowCount(0);
     if (m_uncertainty) m_uncertainty->setText(QStringLiteral("Bootstrap 置信度将在完整流水线执行后显示。"));

@@ -48,6 +48,18 @@ BoardCornerDetection detectArucoBoard(const cv::Mat &image, const BoardSpec &boa
 {
     BoardCornerDetection result;
     const cv::aruco::Dictionary dictionary = dictionaryFor(board);
+    const bool validGeometry = board.pattern == BoardPattern::Charuco
+                                   ? board.innerCornersX >= 1 && board.innerCornersY >= 1
+                                         && board.squareSizeM > 0.0 && board.markerSizeM > 0.0
+                                         && board.markerSizeM < board.squareSizeM
+                                   : board.markerCountX >= 1 && board.markerCountY >= 1
+                                         && board.markerSizeM > 0.0
+                                         && board.markerSeparationM >= 0.0;
+    if (!validGeometry) {
+        result.status = ImageSampleStatus::DetectionFailed;
+        result.message = QStringLiteral("标定板几何参数无效，请检查网格尺寸、marker 尺寸和间距。");
+        return result;
+    }
     cv::aruco::DetectorParameters detectorParameters;
     cv::aruco::ArucoDetector detector(dictionary, detectorParameters);
     std::vector<int> ids;
@@ -77,7 +89,8 @@ BoardCornerDetection detectArucoBoard(const cv::Mat &image, const BoardSpec &boa
         for (int id : charucoIds) result.cornerIds.append(id);
         result.detectionMethod = QStringLiteral("ChArUco marker + 亚像素角点");
     } else {
-        if (board.markerCountX < 1 || board.markerCountY < 1 || board.markerSizeM <= 0.0) {
+        if (board.markerCountX < 1 || board.markerCountY < 1 || board.markerSizeM <= 0.0
+            || board.markerSeparationM < 0.0) {
             result.status = ImageSampleStatus::DetectionFailed;
             result.message = QStringLiteral("ArUco Grid 参数无效。");
             return result;
@@ -134,7 +147,7 @@ void makeObjectAndImagePoints(const BoardCornerDetection &detection,
     }
     const cv::aruco::GridBoard gridBoard(
         cv::Size(board.markerCountX, board.markerCountY), static_cast<float>(board.markerSizeM),
-        static_cast<float>(board.markerSizeM * 0.25), dictionary);
+        static_cast<float>(board.markerSeparationM), dictionary);
     std::vector<std::vector<cv::Point2f>> markerCorners;
     markerCorners.reserve(static_cast<size_t>(detection.markerCorners.size()));
     for (const QVector<Vector2> &marker : detection.markerCorners) markerCorners.push_back(toCvCorners(marker));

@@ -21,6 +21,7 @@ enum class CalibrationMethod { Tsai, Park, Horaud, Andreff, Daniilidis, PointBas
 enum class CalibrationMode { EyeInHand, EyeToHand };
 enum class CalibrationInputMode { PosePairs, FixedPoint3D };
 enum class RotationFormat { Rodrigues, EulerXYZ, RPY, QuaternionWXYZ };
+enum class PoseConvention { Generic, EulerXYZIntrinsic, RpyZyx, KukaAbcZyx, FanucWprXyz };
 enum class AngleUnit { Radians, Degrees };
 enum class LengthUnit { Meters, Millimeters };
 enum class PoseDirection { GripperToBase, TargetToCamera, CameraToGripper };
@@ -41,6 +42,7 @@ enum class CameraCalibrationSampleStatus { NotProcessed, DetectionFailed, Valid,
 
 struct PoseInputSpec {
     RotationFormat rotationFormat = RotationFormat::Rodrigues;
+    PoseConvention convention = PoseConvention::Generic;
     AngleUnit angleUnit = AngleUnit::Radians;
     LengthUnit lengthUnit = LengthUnit::Meters;
     PoseAdapterKind adapter = PoseAdapterKind::Generic;
@@ -88,6 +90,7 @@ struct BoardSpec {
     int markerCountX = 5;
     int markerCountY = 7;
     double markerSizeM = 0.01875;
+    double markerSeparationM = 0.005;
 };
 
 struct CameraIntrinsics {
@@ -139,7 +142,7 @@ struct CameraCalibrationReport {
     QVector<CameraCalibrationSample> samples;
 };
 
-struct ReliabilityReport {
+struct AxXbReport {
     bool available = false;
     bool valid = false;
     bool passed = false;
@@ -155,6 +158,8 @@ struct ReliabilityReport {
     QStringList warnings;
     QVector<SampleResidual> sampleResiduals;
 };
+
+using ReliabilityReport = AxXbReport;
 
 struct FixedTargetPoseSample {
     int sampleId = 0;
@@ -234,6 +239,9 @@ struct NonlinearOptimizationReport {
     double beforeTranslationRmseM = 0.0;
     double afterRotationRmseDeg = 0.0;
     double afterTranslationRmseM = 0.0;
+    double normalizedHuberLossBefore = 0.0;
+    double normalizedHuberLossAfter = 0.0;
+    double normalizedHuberDelta = 1.0;
     QString message;
 };
 
@@ -254,6 +262,10 @@ struct BootstrapReport {
     bool success = false;
     int requestedResamples = 0;
     int successfulResamples = 0;
+    int rawSuccessfulResamples = 0;
+    int nonlinearSuccessfulResamples = 0;
+    int invalidResamples = 0;
+    CalibrationMethod baseMethod = CalibrationMethod::Tsai;
     double confidenceLevel = 0.95;
     Vector3 rotationStdDeg{};
     Vector3 translationStdM{};
@@ -263,8 +275,16 @@ struct BootstrapReport {
     Vector3 translationUpperM{};
     double rotationNormStdDeg = 0.0;
     double translationNormStdM = 0.0;
-    double confidenceScore = 0.0;
+    double successRate = 0.0;
     QStringList warnings;
+    QString message;
+};
+
+struct OutlierValidationStep {
+    int sampleId = 0;
+    double beforeLoss = 0.0;
+    double afterLoss = 0.0;
+    bool accepted = false;
     QString message;
 };
 
@@ -282,9 +302,12 @@ struct ReliabilityPipelineReport {
     int finalSampleCount = 0;
     int autoRemovedCount = 0;
     QVector<int> removedSampleIds;
+    QVector<int> candidateSampleIds;
+    QVector<int> retainedOutlierIds;
+    QVector<OutlierValidationStep> outlierValidation;
     QVector<PipelineStageReport> stages;
     PnpQualityReport pnpReport;
-    ReliabilityReport axXbReport;
+    AxXbReport axXbReport;
     FixedTargetPoseReport fixedTargetReport;
     FixedPointReport fixedPointReport;
     PoseQualityReport qualityReport;
@@ -327,6 +350,7 @@ struct PoseSample {
 
 struct CalibrationResult {
     CalibrationMethod method = CalibrationMethod::Tsai;
+    CalibrationMethod seedMethod = CalibrationMethod::Tsai;
     bool success = false;
     bool recommended = false;
     Matrix4 cameraToGripper{};
@@ -334,8 +358,10 @@ struct CalibrationResult {
     double translationError = 0.0;
     qint64 elapsedMs = 0;
     QString message;
-    ReliabilityReport trainingReport;
-    ReliabilityReport validationReport;
+    AxXbReport axXbReport;
+    // Legacy mirror kept for source compatibility with older integrations.
+    AxXbReport trainingReport;
+    AxXbReport validationReport;
     FixedTargetPoseReport fixedTargetReport;
     FixedPointReport fixedPointReport;
     PoseQualityReport qualityReport;
@@ -366,6 +392,7 @@ struct CalibrationDataset {
     int bootstrapResamples = 200;
     double bootstrapConfidence = 0.95;
     QDateTime createdAt = QDateTime::currentDateTime();
+    quint64 revision = 0;
 };
 
 inline QString methodName(CalibrationMethod method)

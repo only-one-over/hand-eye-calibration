@@ -35,9 +35,13 @@ AdapterResult parseRobotPoseLine(const QString &line, PoseAdapterKind adapter, i
         }
         values.append(value);
     }
-    const PoseInputSpec spec = pose::defaultSpec(adapter);
-    const auto normalized = pose::normalize({values[3], values[4], values[5], 0.0},
-                                            {values[0], values[1], values[2]}, spec);
+    const Vector4 rotation{values[3], values[4], values[5], 0.0};
+    const Vector3 translation{values[0], values[1], values[2]};
+    const auto normalized = adapter == PoseAdapterKind::Kuka
+                                ? pose::normalizeKukaAbc(rotation, translation)
+                                : adapter == PoseAdapterKind::Fanuc
+                                      ? pose::normalizeFanucWpr(rotation, translation)
+                                      : pose::normalize(rotation, translation, pose::defaultSpec(adapter));
     result.success = normalized.success;
     result.rotation = normalized.rotation;
     result.translation = normalized.translation;

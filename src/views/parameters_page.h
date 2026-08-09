@@ -56,6 +56,7 @@ private:
     QLineEdit *m_markerCountXEdit = nullptr;
     QLineEdit *m_markerCountYEdit = nullptr;
     QLineEdit *m_markerSizeEdit = nullptr;
+    QLineEdit *m_markerSeparationEdit = nullptr;
     QLineEdit *m_cameraMatrixEdit = nullptr;
     QLineEdit *m_distortionEdit = nullptr;
     QLineEdit *m_passRotationEdit = nullptr;

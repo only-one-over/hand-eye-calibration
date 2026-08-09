@@ -1,6 +1,7 @@
 #include "core/point_calibration_service.h"
 
 #include "core/matrix_utils.h"
+#include "core/normalized_huber.h"
 #include "core/pose_quality_service.h"
 
 #include <opencv2/core.hpp>
@@ -140,24 +141,22 @@ QVector<cv::Vec3d> predictedPoints(const QVector<PointSample> &samples, const Op
     return result;
 }
 
-double huberLoss(const cv::Vec3d &residual, double threshold)
-{
-    const double norm = norm3(residual);
-    if (norm <= threshold) return 0.5 * norm * norm;
-    return threshold * (norm - 0.5 * threshold);
-}
-
 double optimize(const QVector<PointSample> &samples, OptimizationState *state,
                 NonlinearOptimizationReport *report)
 {
-    const double threshold = 0.001;
     auto lossFor = [&](const OptimizationState &candidate) {
         const QVector<cv::Vec3d> points = predictedPoints(samples, candidate);
         double loss = 0.0;
-        for (const cv::Vec3d &point : points) loss += huberLoss(point - candidate.fixedPoint, threshold);
+        for (const cv::Vec3d &point : points) {
+            const cv::Vec3d residual = point - candidate.fixedPoint;
+            const NormalizedHuberEvaluation evaluation = NormalizedHuber::evaluateTranslation(
+                {residual[0], residual[1], residual[2]});
+            loss += evaluation.loss;
+        }
         return loss;
     };
     double currentLoss = lossFor(*state);
+    report->normalizedHuberLossBefore = currentLoss;
     double lambda = 1e-3;
     for (int iteration = 0; iteration < 50; ++iteration) {
         const QVector<cv::Vec3d> points = predictedPoints(samples, *state);
@@ -165,8 +164,9 @@ double optimize(const QVector<PointSample> &samples, OptimizationState *state,
         cv::Mat gradient = cv::Mat::zeros(9, 1, CV_64F);
         for (int sampleIndex = 0; sampleIndex < samples.size(); ++sampleIndex) {
             const cv::Vec3d residual = points.at(sampleIndex) - state->fixedPoint;
-            const double residualNorm = norm3(residual);
-            const double weight = residualNorm <= threshold ? 1.0 : threshold / std::max(residualNorm, 1e-12);
+            const NormalizedHuberEvaluation evaluation = NormalizedHuber::evaluateTranslation(
+                {residual[0], residual[1], residual[2]});
+            const double weight = evaluation.weight;
             cv::Mat jacobian(3, 9, CV_64F, cv::Scalar(0));
             for (int parameter = 0; parameter < 9; ++parameter) {
                 OptimizationState perturbed = *state;
@@ -184,10 +184,11 @@ double optimize(const QVector<PointSample> &samples, OptimizationState *state,
                 const cv::Vec3d changed = predictedPoints(samples, perturbed).at(sampleIndex)
                                            - perturbed.fixedPoint;
                 const cv::Vec3d derivative = (changed - residual) * (1.0 / step);
-                for (int row = 0; row < 3; ++row) jacobian.at<double>(row, parameter) = derivative[row];
+                for (int row = 0; row < 3; ++row)
+                    jacobian.at<double>(row, parameter) = derivative[row] / 0.001;
             }
             cv::Mat residualMat(3, 1, CV_64F);
-            for (int row = 0; row < 3; ++row) residualMat.at<double>(row, 0) = residual[row];
+            for (int row = 0; row < 3; ++row) residualMat.at<double>(row, 0) = residual[row] / 0.001;
             hessian += weight * jacobian.t() * jacobian;
             gradient += weight * jacobian.t() * residualMat;
         }
@@ -218,6 +219,13 @@ double optimize(const QVector<PointSample> &samples, OptimizationState *state,
         } else {
             lambda = std::min(lambda * 4.0, 1e8);
         }
+    }
+    report->normalizedHuberLossAfter = currentLoss;
+    const QVector<cv::Vec3d> finalPoints = predictedPoints(samples, *state);
+    for (const cv::Vec3d &point : finalPoints) {
+        const cv::Vec3d residual = point - state->fixedPoint;
+        report->huberOutlierCount += NormalizedHuber::evaluateTranslation(
+            {residual[0], residual[1], residual[2]}).outlier ? 1 : 0;
     }
     return currentLoss;
 }
@@ -258,6 +266,7 @@ CalibrationResult PointCalibrationService::calibrate(const CalibrationDataset &d
 {
     CalibrationResult result;
     result.method = CalibrationMethod::PointBased;
+    result.seedMethod = CalibrationMethod::PointBased;
     result.qualityReport = PoseQualityService::evaluatePointQuality(dataset);
     if (dataset.inputMode != CalibrationInputMode::FixedPoint3D) {
         result.message = QStringLiteral("当前数据不是 FixedPoint3D 模式。");
@@ -291,15 +300,16 @@ CalibrationResult PointCalibrationService::calibrate(const CalibrationDataset &d
         result.cameraToGripper = matrix::toArray(state.pose);
         result.fixedPointReport = after;
         result.optimizationReport = optimization;
-        result.trainingReport.available = true;
-        result.trainingReport.valid = after.success;
-        result.trainingReport.passed = after.rmseM <= dataset.passTranslationRmseM && after.outlierCount == 0;
-        result.trainingReport.sampleCount = dataset.pointSamples.size();
-        result.trainingReport.translationRmseM = after.rmseM;
-        result.trainingReport.translationMeanM = after.meanErrorM;
-        result.trainingReport.translationMaxM = after.maxErrorM;
+        result.axXbReport.available = true;
+        result.axXbReport.valid = after.success;
+        result.axXbReport.passed = after.rmseM <= dataset.passTranslationRmseM && after.outlierCount == 0;
+        result.axXbReport.sampleCount = dataset.pointSamples.size();
+        result.axXbReport.translationRmseM = after.rmseM;
+        result.axXbReport.translationMeanM = after.meanErrorM;
+        result.axXbReport.translationMaxM = after.maxErrorM;
+        result.trainingReport = result.axXbReport;
         result.success = after.success;
-        result.message = result.trainingReport.passed ? QStringLiteral("点基标定成功，固定点残差通过")
+        result.message = result.axXbReport.passed ? QStringLiteral("点基标定成功，固定点残差通过")
                                                        : QStringLiteral("点基标定成功，但固定点残差未通过");
     } catch (const cv::Exception &error) {
         result.message = QStringLiteral("OpenCV 错误：%1").arg(QString::fromStdString(error.what()));

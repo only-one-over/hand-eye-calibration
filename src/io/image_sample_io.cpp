@@ -27,7 +27,9 @@ IoResult readRobotPoseCsv(const QString &filePath, CalibrationDataset *dataset,
         const QStringList tokens = line.split(QRegularExpression(QStringLiteral(",")), Qt::KeepEmptyParts);
         if (!tokens.isEmpty() && tokens.at(0).trimmed().compare(QStringLiteral("id"), Qt::CaseInsensitive) == 0)
             continue;
-        if (tokens.size() != 7 && tokens.size() != 8)
+        const int expectedTokens = 1 + 3
+                                    + (inputSpec.rotationFormat == RotationFormat::QuaternionWXYZ ? 4 : 3);
+        if (tokens.size() != expectedTokens)
             return {false, QStringLiteral("Line %1 must contain id, 3 translation values and 3 or 4 rotation values.")
                                .arg(lineNumber)};
 
@@ -86,7 +88,9 @@ IoResult readPoseImageCsv(const QString &filePath, CalibrationDataset *dataset,
         const QStringList tokens = line.split(QRegularExpression(QStringLiteral(",")), Qt::KeepEmptyParts);
         if (tokens.size() >= 2 && tokens.at(0).trimmed().compare(QStringLiteral("id"), Qt::CaseInsensitive) == 0)
             continue;
-        if (tokens.size() != 8 && tokens.size() != 9)
+        const int expectedTokens = 2 + 3
+                                    + (inputSpec.rotationFormat == RotationFormat::QuaternionWXYZ ? 4 : 3);
+        if (tokens.size() != expectedTokens)
             return {false, QStringLiteral("Line %1 must contain id,image_path,3 translation values and 3 or 4 rotation values.")
                                .arg(lineNumber)};
 

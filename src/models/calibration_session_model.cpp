@@ -93,23 +93,23 @@ QVariant ResultTableModel::data(const QModelIndex &index, int role) const
     const CalibrationResult &result = m_results.at(index.row());
     if (role == Qt::ForegroundRole) {
         if (result.recommended) return QBrush(QColor("#15A877"));
-        if (!result.trainingReport.passed) return QBrush(QColor("#E8463A"));
+        if (!result.axXbReport.passed) return QBrush(QColor("#E8463A"));
     }
     if (role == Qt::BackgroundRole) {
         if (result.recommended) return QBrush(QColor("#E8F6F1"));
-        if (!result.trainingReport.passed && result.success) return QBrush(QColor("#FCEBEA"));
+        if (!result.axXbReport.passed && result.success) return QBrush(QColor("#FCEBEA"));
     }
     if (role != Qt::DisplayRole) return {};
     switch (index.column()) {
     case 0: return methodName(result.method);
     case 1: return result.success ? QStringLiteral("成功") : QStringLiteral("失败");
-    case 2: return QLocale().toString(result.trainingReport.rotationRmseDeg, 'f', 5);
-    case 3: return QLocale().toString(result.trainingReport.translationRmseM, 'f', 7);
-    case 4: return QLocale().toString(result.trainingReport.rotationMeanDeg, 'f', 5);
-    case 5: return QLocale().toString(result.trainingReport.rotationMaxDeg, 'f', 5);
-    case 6: return QLocale().toString(result.trainingReport.translationMeanM, 'f', 7);
-    case 7: return QLocale().toString(result.trainingReport.translationMaxM, 'f', 7);
-    case 8: return result.trainingReport.passed ? QStringLiteral("通过") : QStringLiteral("未通过");
+    case 2: return QLocale().toString(result.axXbReport.rotationRmseDeg, 'f', 5);
+    case 3: return QLocale().toString(result.axXbReport.translationRmseM, 'f', 7);
+    case 4: return QLocale().toString(result.axXbReport.rotationMeanDeg, 'f', 5);
+    case 5: return QLocale().toString(result.axXbReport.rotationMaxDeg, 'f', 5);
+    case 6: return QLocale().toString(result.axXbReport.translationMeanM, 'f', 7);
+    case 7: return QLocale().toString(result.axXbReport.translationMaxM, 'f', 7);
+    case 8: return result.axXbReport.passed ? QStringLiteral("通过") : QStringLiteral("未通过");
     case 9: return result.recommended ? QStringLiteral("推荐") : QString{};
     case 10: return result.message;
     }

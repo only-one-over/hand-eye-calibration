@@ -83,9 +83,6 @@ void MainWindow::buildMenuBar()
 
 void MainWindow::connectSignals()
 {
-    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int index) {
-        if (index == ParametersPageIndex) syncParametersToController();
-    });
     connect(m_homePage, &HomePage::navigateRequested, this, &MainWindow::navigateToPage);
     connect(m_capturePage, &CapturePage::uploadRobotRequested, this, &MainWindow::onImportRobotPoseCsv);
     connect(m_capturePage, &CapturePage::uploadImagesRequested, this, &MainWindow::onImportCalibrationImages);
@@ -170,12 +167,13 @@ void MainWindow::syncParametersToController()
 {
     if (!m_parametersPage || !m_controller) return;
     const PoseInputSpec spec = m_parametersPage->inputSpec();
-    m_cameraCalibrationPage->setBoardSpec(m_parametersPage->boardSpec());
+    const BoardSpec board = m_parametersPage->boardSpec();
+    const CameraIntrinsics intrinsics = m_parametersPage->cameraIntrinsics();
+    m_cameraCalibrationPage->setBoardSpec(board);
     m_manualPosePage->setInputSpec(spec);
-    m_controller->updateInputSpec(spec, m_parametersPage->robotName(), m_parametersPage->cameraName());
-    m_controller->updateImageProcessing(m_parametersPage->boardSpec(), m_parametersPage->cameraIntrinsics());
-    m_controller->updateReliabilityThresholds(m_parametersPage->passRotationRmseDeg(),
-                                               m_parametersPage->passTranslationRmseM());
+    m_controller->synchronizeParameters(spec, m_parametersPage->robotName(), m_parametersPage->cameraName(),
+                                         board, intrinsics, m_parametersPage->passRotationRmseDeg(),
+                                         m_parametersPage->passTranslationRmseM());
 }
 
 void MainWindow::navigateToPage(int index)

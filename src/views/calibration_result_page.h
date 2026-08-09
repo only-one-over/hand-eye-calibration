@@ -49,6 +49,8 @@ private:
     ResultTableModel *m_model = nullptr;
     QTableView *m_table = nullptr;
     QLabel *m_reliability = nullptr;
+    QLabel *m_axXbReport = nullptr;
+    QLabel *m_fixedTargetReport = nullptr;
     QPlainTextEdit *m_matrix = nullptr;
     QPlainTextEdit *m_log = nullptr;
     QSpinBox *m_referenceSample = nullptr;
