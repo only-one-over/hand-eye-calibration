@@ -60,6 +60,18 @@ CurrentDataPage::CurrentDataPage(QWidget *parent) : QWidget(parent)
     splitter->setStretchFactor(1, 2);
     layout->addWidget(splitter, 1);
 
+    auto *flowBar = new QHBoxLayout;
+    auto *flowHint = new QLabel(QStringLiteral("确认每组机器人 TCP 与相机/图片数据对应无误后，进入结果页执行计算和分析。"), this);
+    flowHint->setWordWrap(true);
+    flowHint->setStyleSheet(QStringLiteral("color: #667085;"));
+    flowBar->addWidget(flowHint, 1);
+    auto *nextButton = new QPushButton(QStringLiteral("下一步：计算并查看结果"), this);
+    nextButton->setObjectName(QStringLiteral("currentDataNextButton"));
+    nextButton->setProperty("variant", "primary");
+    flowBar->addWidget(nextButton);
+    layout->addLayout(flowBar);
+    connect(nextButton, &QPushButton::clicked, this, &CurrentDataPage::nextRequested);
+
     connect(m_table->selectionModel(), &QItemSelectionModel::currentRowChanged,
             this, &CurrentDataPage::onCurrentRowChanged);
 }
@@ -77,6 +89,11 @@ void CurrentDataPage::setSamples(const QVector<PoseSample> &samples)
     }
     m_table->selectRow(0);
     onCurrentRowChanged(m_model->index(0, 0), {});
+}
+
+void CurrentDataPage::setMode(CalibrationMode mode, CalibrationInputMode inputMode)
+{
+    m_model->setMode(mode, inputMode);
 }
 
 void CurrentDataPage::onCurrentRowChanged(const QModelIndex &current, const QModelIndex &)

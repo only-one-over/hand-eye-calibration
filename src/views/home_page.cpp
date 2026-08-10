@@ -25,30 +25,35 @@ HomePage::HomePage(QWidget *parent) : QWidget(parent)
     title->setFont(titleFont);
     layout->addWidget(title);
 
-    auto *subtitle = new QLabel(QStringLiteral("从设置参数到得到 camera→gripper 矩阵，只需要三步。"), this);
+    auto *subtitle = new QLabel(QStringLiteral("按向导完成参数设置、数据上传、数据确认，最后查看标定结果与分析。"), this);
     subtitle->setObjectName(QStringLiteral("homeSubtitle"));
     layout->addWidget(subtitle);
+
+    auto *startButton = new QPushButton(QStringLiteral("开始手眼标定"), this);
+    startButton->setObjectName(QStringLiteral("startCalibrationButton"));
+    startButton->setProperty("variant", "primary");
+    startButton->setMinimumHeight(44);
+    layout->addWidget(startButton);
+    connect(startButton, &QPushButton::clicked, this, &HomePage::startCalibrationRequested);
 
     auto *steps = new QGridLayout;
     steps->setHorizontalSpacing(14);
     const QStringList stepTitles = {QStringLiteral("1  设置参数"), QStringLiteral("2  上传本轮数据"),
-                                    QStringLiteral("3  执行手眼标定")};
+                                    QStringLiteral("3  确认当前数据"), QStringLiteral("4  查看结果分析")};
     const QStringList stepTexts = {
         QStringLiteral("选择算法、姿态格式、单位、棋盘格和相机内参。"),
         QStringLiteral("上传机器人坐标和同顺序的标定板图片。"),
-        QStringLiteral("处理图片、比较五种算法并查看可靠性报告。")};
-    const QVector<int> pages = {2, 1, 6};
-    for (int index = 0; index < 3; ++index) {
+        QStringLiteral("逐组检查 TCP、图片和 target→camera 是否正确对应。"),
+        QStringLiteral("查看矩阵、误差、质量评分和可靠性分析。")};
+    for (int index = 0; index < stepTitles.size(); ++index) {
         auto *card = new QGroupBox(stepTitles.at(index), this);
         auto *cardLayout = new QVBoxLayout(card);
         auto *text = new QLabel(stepTexts.at(index), card);
         text->setWordWrap(true);
         cardLayout->addWidget(text);
-        auto *button = new QPushButton(QStringLiteral("开始"), card);
-        cardLayout->addWidget(button);
-        connect(button, &QPushButton::clicked, this, [this, page = pages.at(index)] {
-            emit navigateRequested(page);
-        });
+        auto *stepHint = new QLabel(QStringLiteral("完成后点击页面底部的“下一步”。"), card);
+        stepHint->setStyleSheet(QStringLiteral("color: #667085;"));
+        cardLayout->addWidget(stepHint);
         steps->addWidget(card, 0, index);
     }
     layout->addLayout(steps);
@@ -64,19 +69,19 @@ HomePage::HomePage(QWidget *parent) : QWidget(parent)
     stateLayout->addWidget(m_statusLabel);
     layout->addWidget(stateGroup);
 
-    auto *quickLayout = new QGridLayout;
+    auto *advancedGroup = new QGroupBox(QStringLiteral("高级入口（不影响主流程）"), this);
+    auto *quickLayout = new QGridLayout(advancedGroup);
     const QVector<QPair<QString, int>> quickActions = {
-        {QStringLiteral("设置参数"), 2}, {QStringLiteral("自主标定相机"), 3},
-        {QStringLiteral("手动输入位姿"), 4}, {QStringLiteral("开始采集"), 1},
-        {QStringLiteral("查看当前数据"), 5}, {QStringLiteral("查看标定结果"), 6}};
+        {QStringLiteral("自主标定相机"), 3}, {QStringLiteral("手动输入位姿"), 4},
+        {QStringLiteral("生成标定板 PDF"), 5}, {QStringLiteral("查看标定结果"), 7}};
     for (int index = 0; index < quickActions.size(); ++index) {
-        auto *button = new QPushButton(quickActions.at(index).first, this);
+        auto *button = new QPushButton(quickActions.at(index).first, advancedGroup);
         quickLayout->addWidget(button, index / 2, index % 2);
         connect(button, &QPushButton::clicked, this, [this, page = quickActions.at(index).second] {
             emit navigateRequested(page);
         });
     }
-    layout->addLayout(quickLayout);
+    layout->addWidget(advancedGroup);
     layout->addStretch();
 }
 

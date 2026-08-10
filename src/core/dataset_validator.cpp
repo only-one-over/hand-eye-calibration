@@ -16,10 +16,28 @@ ValidationReport validateDataset(const CalibrationDataset &dataset,
 {
     ValidationReport report;
     const QVector<PoseSample> &samples = samplesOverride ? *samplesOverride : dataset.samples;
-    if (dataset.mode == CalibrationMode::EyeToHand)
-        report.errors << QStringLiteral("Eye-To-Hand 输入方向适配尚未完成，当前版本已禁用该模式。");
+    if (dataset.mode == CalibrationMode::EyeToHand
+        && dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+        if (dataset.pointSamples.size() < 5)
+            report.errors << QStringLiteral("Eye-To-Hand FixedPoint3D 至少需要 5 组 TCP 与相机 XYZ 样本。");
+        QSet<int> pointIds;
+        for (int index = 0; index < dataset.pointSamples.size(); ++index) {
+            const PointSample &point = dataset.pointSamples.at(index);
+            if (pointIds.contains(point.id))
+                report.errors << QStringLiteral("点基样本 ID 重复：%1。" ).arg(point.id);
+            pointIds.insert(point.id);
+            if (!matrix::isFinite(point.gripperRotation) || !matrix::isFinite(point.gripperTranslation)
+                || !matrix::isFinite(point.cameraPoint))
+                report.errors << QStringLiteral("第 %1 组点基样本包含非有限数值。" ).arg(index + 1);
+        }
+        report.valid = report.errors.isEmpty();
+        return report;
+    }
     if (samples.size() < 3)
         report.errors << QStringLiteral("至少需要 3 组有效样本。");
+    if (dataset.mode == CalibrationMode::EyeToHand
+        && dataset.inputMode == CalibrationInputMode::PosePairs && samples.size() < 5)
+        report.errors << QStringLiteral("Eye-To-Hand PosePairs 建议并要求至少 5 组样本。");
 
     QSet<int> ids;
     for (int i = 0; i < samples.size(); ++i) {

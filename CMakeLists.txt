@@ -51,6 +51,8 @@ set(PROJECT_SOURCES
     src/views/capture_page.h
     src/views/parameters_page.cpp
     src/views/parameters_page.h
+    src/views/board_pdf_page.cpp
+    src/views/board_pdf_page.h
     src/views/camera_calibration_page.cpp
     src/views/camera_calibration_page.h
     src/views/manual_pose_page.cpp
@@ -66,6 +68,10 @@ set(PROJECT_SOURCES
     src/core/matrix_utils.h
     src/core/board_pose_estimator.cpp
     src/core/board_pose_estimator.h
+    src/core/board_pdf_generator.cpp
+    src/core/board_pdf_generator.h
+    src/core/board_pdf_storage.cpp
+    src/core/board_pdf_storage.h
     src/core/camera_calibration_service.cpp
     src/core/camera_calibration_service.h
     src/core/pose_quality_service.cpp
@@ -82,10 +88,14 @@ set(PROJECT_SOURCES
     src/core/pose_conversion.h
     src/core/dataset_validator.cpp
     src/core/dataset_validator.h
+    src/core/document_service.cpp
+    src/core/document_service.h
     src/core/synthetic_dataset.cpp
     src/core/synthetic_dataset.h
     src/core/calibration_service.cpp
     src/core/calibration_service.h
+    src/core/eye_to_hand_calibration_service.cpp
+    src/core/eye_to_hand_calibration_service.h
     src/io/dataset_io.cpp
     src/io/dataset_io.h
     src/io/image_sample_io.cpp
@@ -121,6 +131,10 @@ set(HAND_EYE_TEST_SOURCES
     src/core/matrix_utils.h
     src/core/board_pose_estimator.cpp
     src/core/board_pose_estimator.h
+    src/core/board_pdf_generator.cpp
+    src/core/board_pdf_generator.h
+    src/core/board_pdf_storage.cpp
+    src/core/board_pdf_storage.h
     src/core/camera_calibration_service.cpp
     src/core/camera_calibration_service.h
     src/core/pose_quality_service.cpp
@@ -137,16 +151,21 @@ set(HAND_EYE_TEST_SOURCES
     src/core/pose_conversion.h
     src/core/dataset_validator.cpp
     src/core/dataset_validator.h
+    src/core/document_service.cpp
+    src/core/document_service.h
     src/core/synthetic_dataset.cpp
     src/core/synthetic_dataset.h
     src/core/calibration_service.cpp
     src/core/calibration_service.h
+    src/core/eye_to_hand_calibration_service.cpp
+    src/core/eye_to_hand_calibration_service.h
     src/io/dataset_io.cpp
     src/io/dataset_io.h
     src/io/image_sample_io.cpp
     src/io/image_sample_io.h
     src/io/pose_adapter.cpp
     src/io/pose_adapter.h
+    src/resources.qrc
 )
 
 qt_add_executable(handeye_tests ${HAND_EYE_TEST_SOURCES})
@@ -162,3 +181,5 @@ install(TARGETS hand_eye_calibration
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+install(DIRECTORY docs DESTINATION docs OPTIONAL)

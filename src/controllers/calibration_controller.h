@@ -42,6 +42,7 @@ public:
                                const PoseInputSpec &spec);
     bool applyManualPointInputs(const QVector<PointSample> &samples,
                                 const PoseInputSpec &spec);
+    void recordBoardPdfReport(const BoardPdfReport &report);
 
     FixedTargetPoseReport computeFixedTargetPose(const CalibrationResult &result,
                                                  int referenceSampleId = -1);
@@ -57,7 +58,9 @@ public:
     // Input spec update
     void synchronizeParameters(const PoseInputSpec &spec, const QString &robot, const QString &camera,
                                const BoardSpec &board, const CameraIntrinsics &intrinsics,
-                               double rotationRmseDeg, double translationRmseM);
+                               double rotationRmseDeg, double translationRmseM,
+                               CalibrationMode mode = CalibrationMode::EyeInHand,
+                               CalibrationInputMode inputMode = CalibrationInputMode::PosePairs);
     void updateInputSpec(const PoseInputSpec &spec, const QString &robot, const QString &camera);
     void updateImageProcessing(const BoardSpec &board, const CameraIntrinsics &intrinsics);
     void updateReliabilityThresholds(double rotationRmseDeg, double translationRmseM);

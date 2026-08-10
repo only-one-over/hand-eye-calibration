@@ -21,9 +21,11 @@ public:
 
 signals:
     void deleteRequested(const QVector<int> &ids);
+    void nextRequested();
 
 public slots:
     void setSamples(const QVector<PoseSample> &samples);
+    void setMode(CalibrationMode mode, CalibrationInputMode inputMode);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;

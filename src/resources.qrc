@@ -7,5 +7,8 @@
         <file>assets/icons/Delete.svg</file>
         <file>assets/icons/add.svg</file>
         <file>assets/icons/Refresh.svg</file>
+        <file alias="docs/hand_eye_quick_start.pdf">assets/docs/hand_eye_quick_start.pdf</file>
+        <file alias="docs/checkerboard_printing.pdf">assets/docs/checkerboard_printing.pdf</file>
+        <file alias="docs/data_collection_quality.pdf">assets/docs/data_collection_quality.pdf</file>
     </qresource>
 </RCC>

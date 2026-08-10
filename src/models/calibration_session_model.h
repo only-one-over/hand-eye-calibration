@@ -15,11 +15,14 @@ public:
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
     QVariant headerData(int section, Qt::Orientation orientation, int role) const override;
     void setSamples(const QVector<PoseSample> &samples);
+    void setMode(CalibrationMode mode, CalibrationInputMode inputMode);
     void clear();
     QVector<int> idsAt(const QModelIndexList &indexes) const;
 
 private:
     QVector<PoseSample> m_samples;
+    CalibrationMode m_mode = CalibrationMode::EyeInHand;
+    CalibrationInputMode m_inputMode = CalibrationInputMode::PosePairs;
 };
 
 class ResultTableModel : public QAbstractTableModel

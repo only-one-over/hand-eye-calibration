@@ -50,12 +50,19 @@ QVariant SampleTableModel::headerData(int section, Qt::Orientation orientation, 
 {
     if (role != Qt::DisplayRole) return {};
     if (orientation == Qt::Vertical) return section + 1;
-    static const QStringList headers = {QStringLiteral("ID"), QStringLiteral("标签"),
-        QStringLiteral("G Rx"), QStringLiteral("G Ry"), QStringLiteral("G Rz"),
-        QStringLiteral("G Tx"), QStringLiteral("G Ty"), QStringLiteral("G Tz"),
-        QStringLiteral("T Rx"), QStringLiteral("T Ry"), QStringLiteral("T Rz"),
-        QStringLiteral("T Tx"), QStringLiteral("T Ty"), QStringLiteral("T Tz"),
-        QStringLiteral("旋转残差(°)"), QStringLiteral("平移残差(m)"), QStringLiteral("样本状态")};
+    const QStringList headers = m_mode == CalibrationMode::EyeToHand && m_inputMode == CalibrationInputMode::PosePairs
+        ? QStringList{QStringLiteral("ID"), QStringLiteral("标签"),
+                      QStringLiteral("TCP Rx"), QStringLiteral("TCP Ry"), QStringLiteral("TCP Rz"),
+                      QStringLiteral("TCP Tx"), QStringLiteral("TCP Ty"), QStringLiteral("TCP Tz"),
+                      QStringLiteral("target→camera Rx"), QStringLiteral("target→camera Ry"), QStringLiteral("target→camera Rz"),
+                      QStringLiteral("target→camera Tx"), QStringLiteral("target→camera Ty"), QStringLiteral("target→camera Tz"),
+                      QStringLiteral("旋转残差(°)"), QStringLiteral("平移残差(m)"), QStringLiteral("样本状态")}
+        : QStringList{QStringLiteral("ID"), QStringLiteral("标签"),
+                      QStringLiteral("G Rx"), QStringLiteral("G Ry"), QStringLiteral("G Rz"),
+                      QStringLiteral("G Tx"), QStringLiteral("G Ty"), QStringLiteral("G Tz"),
+                      QStringLiteral("T Rx"), QStringLiteral("T Ry"), QStringLiteral("T Rz"),
+                      QStringLiteral("T Tx"), QStringLiteral("T Ty"), QStringLiteral("T Tz"),
+                      QStringLiteral("旋转残差(°)"), QStringLiteral("平移残差(m)"), QStringLiteral("样本状态")};
     if (section == 17) return QStringLiteral("图片路径");
     if (section == 18) return QStringLiteral("图片状态");
     if (section == 19) return QStringLiteral("角点数");
@@ -68,6 +75,16 @@ void SampleTableModel::setSamples(const QVector<PoseSample> &samples)
     beginResetModel();
     m_samples = samples;
     endResetModel();
+}
+
+void SampleTableModel::setMode(CalibrationMode mode, CalibrationInputMode inputMode)
+{
+    m_mode = mode;
+    m_inputMode = inputMode;
+    if (!m_samples.isEmpty()) {
+        beginResetModel();
+        endResetModel();
+    }
 }
 
 void SampleTableModel::clear()

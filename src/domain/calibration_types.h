@@ -17,7 +17,17 @@ using Vector3 = std::array<double, 3>;
 using Vector4 = std::array<double, 4>;
 using Vector5 = std::array<double, 5>;
 
-enum class CalibrationMethod { Tsai, Park, Horaud, Andreff, Daniilidis, PointBased, Nonlinear };
+enum class CalibrationMethod {
+    Tsai,
+    Park,
+    Horaud,
+    Andreff,
+    Daniilidis,
+    PointBased,
+    Nonlinear,
+    RobotWorldShah,
+    RobotWorldLi
+};
 enum class CalibrationMode { EyeInHand, EyeToHand };
 enum class CalibrationInputMode { PosePairs, FixedPoint3D };
 enum class RotationFormat { Rodrigues, EulerXYZ, RPY, QuaternionWXYZ };
@@ -91,6 +101,20 @@ struct BoardSpec {
     int markerCountY = 7;
     double markerSizeM = 0.01875;
     double markerSeparationM = 0.005;
+};
+
+struct BoardPdfReport {
+    bool success = false;
+    bool reused = false;
+    QString outputPath;
+    QString pattern;
+    QString outputMode;
+    int pageCount = 0;
+    double widthMm = 0.0;
+    double heightMm = 0.0;
+    QStringList warnings;
+    QString error;
+    QDateTime generatedAt;
 };
 
 struct CameraIntrinsics {
@@ -212,6 +236,44 @@ struct FixedPointReport {
     QVector<FixedPointSample> samples;
 };
 
+struct EyeToHandPoseResidual {
+    int sampleId = 0;
+    double rotationErrorDeg = 0.0;
+    double translationErrorM = 0.0;
+    bool outlier = false;
+};
+
+struct EyeToHandPoseReport {
+    bool available = false;
+    bool success = false;
+    Matrix4 cameraToBase{};
+    Matrix4 targetToGripper{};
+    double rotationRmseDeg = 0.0;
+    double translationRmseM = 0.0;
+    double rotationMeanDeg = 0.0;
+    double translationMeanM = 0.0;
+    double rotationMaxDeg = 0.0;
+    double translationMaxM = 0.0;
+    int outlierCount = 0;
+    QVector<EyeToHandPoseResidual> samples;
+    QStringList errors;
+    QStringList warnings;
+};
+
+struct EyeToHandPointReport {
+    bool available = false;
+    bool success = false;
+    Matrix4 cameraToBase{};
+    Vector3 pointInGripper{};
+    double rmseM = 0.0;
+    double meanErrorM = 0.0;
+    double maxErrorM = 0.0;
+    int outlierCount = 0;
+    QVector<FixedPointSample> samples;
+    QStringList errors;
+    QStringList warnings;
+};
+
 struct PoseQualityReport {
     bool available = false;
     bool calculable = false;
@@ -315,6 +377,11 @@ struct ReliabilityPipelineReport {
     BootstrapReport bootstrapReport;
     CalibrationMethod finalMethod = CalibrationMethod::Tsai;
     Matrix4 finalCameraToGripper{};
+    Matrix4 finalCameraToBase{};
+    Matrix4 finalTargetToGripper{};
+    Vector3 finalPointInGripper{};
+    EyeToHandPoseReport eyeToHandPoseReport;
+    EyeToHandPointReport eyeToHandPointReport;
     QStringList errors;
     QStringList warnings;
     QString message;
@@ -354,6 +421,10 @@ struct CalibrationResult {
     bool success = false;
     bool recommended = false;
     Matrix4 cameraToGripper{};
+    // Eye-To-Hand only: camera is fixed in the external/base frame.
+    Matrix4 cameraToBase{};
+    Matrix4 targetToGripper{};
+    Vector3 pointInGripper{};
     double rotationErrorDeg = 0.0;
     double translationError = 0.0;
     qint64 elapsedMs = 0;
@@ -367,6 +438,8 @@ struct CalibrationResult {
     PoseQualityReport qualityReport;
     NonlinearOptimizationReport optimizationReport;
     BootstrapReport bootstrapReport;
+    EyeToHandPoseReport eyeToHandPoseReport;
+    EyeToHandPointReport eyeToHandPointReport;
 };
 
 struct CalibrationDataset {
@@ -389,6 +462,7 @@ struct CalibrationDataset {
     Matrix4 groundTruthCameraToGripper{};
     QVector<CalibrationResult> results;
     ReliabilityPipelineReport reliabilityPipelineReport;
+    BoardPdfReport lastBoardPdfReport;
     int bootstrapResamples = 200;
     double bootstrapConfidence = 0.95;
     QDateTime createdAt = QDateTime::currentDateTime();
@@ -405,6 +479,8 @@ inline QString methodName(CalibrationMethod method)
     case CalibrationMethod::Daniilidis: return QStringLiteral("Daniilidis");
     case CalibrationMethod::PointBased: return QStringLiteral("FixedPoint3D 点基");
     case CalibrationMethod::Nonlinear: return QStringLiteral("非线性精修");
+    case CalibrationMethod::RobotWorldShah: return QStringLiteral("Robot-World Shah");
+    case CalibrationMethod::RobotWorldLi: return QStringLiteral("Robot-World Li");
     }
     return QStringLiteral("Unknown");
 }
@@ -544,6 +620,12 @@ inline QVector<CalibrationMethod> allMethods()
 {
     return {CalibrationMethod::Tsai, CalibrationMethod::Park, CalibrationMethod::Horaud,
             CalibrationMethod::Andreff, CalibrationMethod::Daniilidis};
+}
+
+inline QVector<CalibrationMethod> eyeToHandPoseMethods()
+{
+    return {CalibrationMethod::RobotWorldShah, CalibrationMethod::RobotWorldLi,
+            CalibrationMethod::Nonlinear};
 }
 
 } // namespace handeye

@@ -15,6 +15,7 @@ public:
     explicit HomePage(QWidget *parent = nullptr);
 
 signals:
+    void startCalibrationRequested();
     void navigateRequested(int pageIndex);
 
 public slots:

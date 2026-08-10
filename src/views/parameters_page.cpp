@@ -7,8 +7,10 @@
 #include <QFont>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QStandardItemModel>
 #include <QStringList>
@@ -89,10 +91,12 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
     auto *basicForm = new QFormLayout(basicGroup);
     m_modeCombo = new QComboBox(basicGroup);
     m_modeCombo->addItem(QStringLiteral("Eye-In-Hand（眼在手）"));
-    m_modeCombo->addItem(QStringLiteral("Eye-To-Hand（暂未启用）"));
-    if (auto *model = qobject_cast<QStandardItemModel *>(m_modeCombo->model())) model->item(1)->setEnabled(false);
+    m_modeCombo->addItem(QStringLiteral("Eye-To-Hand（眼在手外）"));
+    m_inputModeCombo = new QComboBox(basicGroup);
+    m_inputModeCombo->addItem(QStringLiteral("PosePairs：TCP 6D + target→camera 6D"));
+    m_inputModeCombo->addItem(QStringLiteral("FixedPoint3D：TCP 6D + 相机 XYZ"));
     m_methodCombo = new QComboBox(basicGroup);
-    for (CalibrationMethod method : allMethods()) m_methodCombo->addItem(methodName(method));
+    refreshMethodChoices();
     m_adapterCombo = new QComboBox(basicGroup);
     for (int index = 0; index < 4; ++index) m_adapterCombo->addItem(adapterName(adapterFromIndex(index)));
     m_rotationFormatCombo = new QComboBox(basicGroup);
@@ -105,6 +109,7 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
     m_robotEdit = new QLineEdit(QStringLiteral("未指定机器人"), basicGroup);
     m_cameraEdit = new QLineEdit(QStringLiteral("未指定相机"), basicGroup);
     basicForm->addRow(QStringLiteral("标定模式"), m_modeCombo);
+    basicForm->addRow(QStringLiteral("输入模式"), m_inputModeCombo);
     basicForm->addRow(QStringLiteral("当前算法"), m_methodCombo);
     basicForm->addRow(QStringLiteral("Pose Adapter"), m_adapterCombo);
     basicForm->addRow(QStringLiteral("输入旋转"), m_rotationFormatCombo);
@@ -158,11 +163,23 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
     layout->addWidget(thresholdGroup);
     layout->addStretch();
 
+    auto *flowBar = new QHBoxLayout;
+    auto *flowHint = new QLabel(QStringLiteral("参数确认后进入下一步上传本轮机器人坐标和标定板图片。"), this);
+    flowHint->setWordWrap(true);
+    flowHint->setStyleSheet(QStringLiteral("color: #667085;"));
+    flowBar->addWidget(flowHint, 1);
+    auto *nextButton = new QPushButton(QStringLiteral("下一步：上传数据"), this);
+    nextButton->setObjectName(QStringLiteral("parametersNextButton"));
+    nextButton->setProperty("variant", "primary");
+    flowBar->addWidget(nextButton);
+    layout->addLayout(flowBar);
+
     connect(m_adapterCombo, &QComboBox::currentIndexChanged, this, &ParametersPage::onAdapterChanged);
     const auto connectCombo = [this](QComboBox *combo) {
         connect(combo, &QComboBox::currentIndexChanged, this, &ParametersPage::emitParametersChanged);
     };
     connectCombo(m_modeCombo);
+    connectCombo(m_inputModeCombo);
     connectCombo(m_methodCombo);
     connectCombo(m_rotationFormatCombo);
     connectCombo(m_angleUnitCombo);
@@ -172,6 +189,14 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
     connectCombo(m_detectorCombo);
     connectCombo(m_pnpCombo);
     connectCombo(m_dictionaryCombo);
+    connect(m_modeCombo, &QComboBox::currentIndexChanged, this, [this] {
+        refreshMethodChoices();
+        emitParametersChanged();
+    });
+    connect(m_inputModeCombo, &QComboBox::currentIndexChanged, this, [this] {
+        refreshMethodChoices();
+        emitParametersChanged();
+    });
     const auto connectEdit = [this](QLineEdit *edit) {
         connect(edit, &QLineEdit::editingFinished, this, &ParametersPage::emitParametersChanged);
     };
@@ -181,6 +206,11 @@ ParametersPage::ParametersPage(QWidget *parent) : QWidget(parent)
                             m_cameraMatrixEdit, m_distortionEdit,
                             m_passRotationEdit, m_passTranslationEdit})
         connectEdit(edit);
+
+    connect(nextButton, &QPushButton::clicked, this, [this] {
+        emitParametersChanged();
+        emit nextRequested();
+    });
 }
 
 PoseInputSpec ParametersPage::inputSpec() const
@@ -251,7 +281,18 @@ CameraIntrinsics ParametersPage::cameraIntrinsics() const
 
 CalibrationMethod ParametersPage::currentMethod() const
 {
-    return allMethods().value(m_methodCombo->currentIndex(), CalibrationMethod::Tsai);
+    return static_cast<CalibrationMethod>(m_methodCombo->currentData().toInt());
+}
+
+CalibrationMode ParametersPage::mode() const
+{
+    return m_modeCombo->currentIndex() == 1 ? CalibrationMode::EyeToHand : CalibrationMode::EyeInHand;
+}
+
+CalibrationInputMode ParametersPage::inputMode() const
+{
+    return m_inputModeCombo->currentIndex() == 1 ? CalibrationInputMode::FixedPoint3D
+                                                  : CalibrationInputMode::PosePairs;
 }
 
 double ParametersPage::passRotationRmseDeg() const
@@ -275,7 +316,7 @@ void ParametersPage::setRobotCamera(const QString &robot, const QString &camera)
 
 void ParametersPage::setDatasetParameters(const CalibrationDataset &dataset)
 {
-    const QList<QObject *> controls = {m_modeCombo, m_methodCombo, m_adapterCombo,
+    const QList<QObject *> controls = {m_modeCombo, m_inputModeCombo, m_methodCombo, m_adapterCombo,
                                        m_rotationFormatCombo, m_angleUnitCombo, m_lengthUnitCombo,
                                        m_robotEdit, m_cameraEdit, m_boardColumnsEdit, m_boardRowsEdit,
                                        m_squareSizeEdit, m_markerCountXEdit, m_markerCountYEdit, m_markerSizeEdit,
@@ -286,6 +327,8 @@ void ParametersPage::setDatasetParameters(const CalibrationDataset &dataset)
     for (QObject *control : controls) control->blockSignals(true);
 
     m_modeCombo->setCurrentIndex(dataset.mode == CalibrationMode::EyeToHand ? 1 : 0);
+    m_inputModeCombo->setCurrentIndex(dataset.inputMode == CalibrationInputMode::FixedPoint3D ? 1 : 0);
+    refreshMethodChoices();
     m_adapterCombo->setCurrentIndex(static_cast<int>(dataset.inputSpec.adapter));
     m_rotationFormatCombo->setCurrentIndex(static_cast<int>(dataset.inputSpec.rotationFormat));
     m_angleUnitCombo->setCurrentIndex(dataset.inputSpec.angleUnit == AngleUnit::Degrees ? 1 : 0);
@@ -326,6 +369,31 @@ void ParametersPage::onAdapterChanged(int index)
     m_angleUnitCombo->setCurrentIndex(spec.angleUnit == AngleUnit::Degrees ? 1 : 0);
     m_lengthUnitCombo->setCurrentIndex(spec.lengthUnit == LengthUnit::Millimeters ? 1 : 0);
     emitParametersChanged();
+}
+
+void ParametersPage::refreshMethodChoices()
+{
+    if (!m_methodCombo) return;
+    const CalibrationMode currentMode = m_modeCombo && m_modeCombo->currentIndex() == 1
+                                            ? CalibrationMode::EyeToHand
+                                            : CalibrationMode::EyeInHand;
+    const CalibrationInputMode currentInput = m_inputModeCombo && m_inputModeCombo->currentIndex() == 1
+                                                  ? CalibrationInputMode::FixedPoint3D
+                                                  : CalibrationInputMode::PosePairs;
+    const QVector<CalibrationMethod> methods =
+        currentInput == CalibrationInputMode::FixedPoint3D
+            ? QVector<CalibrationMethod>{CalibrationMethod::PointBased, CalibrationMethod::Nonlinear}
+            : currentMode == CalibrationMode::EyeToHand ? eyeToHandPoseMethods() : allMethods();
+    const CalibrationMethod old = static_cast<CalibrationMethod>(m_methodCombo->currentData().toInt());
+    m_methodCombo->blockSignals(true);
+    m_methodCombo->clear();
+    int selected = 0;
+    for (int index = 0; index < methods.size(); ++index) {
+        m_methodCombo->addItem(methodName(methods.at(index)), static_cast<int>(methods.at(index)));
+        if (methods.at(index) == old) selected = index;
+    }
+    m_methodCombo->setCurrentIndex(selected);
+    m_methodCombo->blockSignals(false);
 }
 
 void ParametersPage::emitParametersChanged()

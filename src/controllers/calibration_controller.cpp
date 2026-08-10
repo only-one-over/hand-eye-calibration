@@ -3,6 +3,7 @@
 #include "core/board_pose_estimator.h"
 #include "core/camera_calibration_service.h"
 #include "core/calibration_service.h"
+#include "core/eye_to_hand_calibration_service.h"
 #include "core/dataset_validator.h"
 #include "core/matrix_utils.h"
 #include "core/nonlinear_optimizer.h"
@@ -75,7 +76,8 @@ const CalibrationDataset &CalibrationController::dataset() const
 void CalibrationController::synchronizeParameters(const PoseInputSpec &spec, const QString &robot,
                                                    const QString &camera, const BoardSpec &board,
                                                    const CameraIntrinsics &intrinsics,
-                                                   double rotationRmseDeg, double translationRmseM)
+                                                   double rotationRmseDeg, double translationRmseM,
+                                                   CalibrationMode mode, CalibrationInputMode inputMode)
 {
     PoseInputSpec normalizedSpec = spec;
     normalizedSpec.direction = PoseDirection::GripperToBase;
@@ -83,15 +85,18 @@ void CalibrationController::synchronizeParameters(const PoseInputSpec &spec, con
                              || m_dataset.robotName != robot || m_dataset.cameraName != camera;
     const bool boardChanged = !boardSpecEqual(m_dataset.boardSpec, board);
     const bool intrinsicsChanged = !intrinsicsEqual(m_dataset.cameraIntrinsics, intrinsics);
+    const bool modeChanged = m_dataset.mode != mode || m_dataset.inputMode != inputMode;
     const bool thresholdsChanged = std::abs(m_dataset.passRotationRmseDeg - rotationRmseDeg) > 1e-12
                                    || std::abs(m_dataset.passTranslationRmseM - translationRmseM) > 1e-12;
-    if (!specChanged && !boardChanged && !intrinsicsChanged && !thresholdsChanged) return;
+    if (!specChanged && !boardChanged && !intrinsicsChanged && !thresholdsChanged && !modeChanged) return;
 
     m_dataset.inputSpec = normalizedSpec;
     m_dataset.robotName = robot;
     m_dataset.cameraName = camera;
     m_dataset.boardSpec = board;
     m_dataset.cameraIntrinsics = intrinsics;
+    m_dataset.mode = mode;
+    m_dataset.inputMode = inputMode;
     if (rotationRmseDeg > 0.0) m_dataset.passRotationRmseDeg = rotationRmseDeg;
     if (translationRmseM > 0.0) m_dataset.passTranslationRmseM = translationRmseM;
     ++m_dataset.revision;
@@ -99,8 +104,14 @@ void CalibrationController::synchronizeParameters(const PoseInputSpec &spec, con
     if (boardChanged || intrinsicsChanged) {
         m_dataset.cameraCalibrationReport = {};
         invalidateComputedState(true, QStringLiteral("棋盘格或相机参数已变化，图片 PnP 位姿需要重新处理。"));
-    } else if (thresholdsChanged) {
-        invalidateComputedState(false, QStringLiteral("可靠性阈值已变化，结果需要重新评价。"));
+    } else if (thresholdsChanged || modeChanged) {
+        m_dataset.results.clear();
+        m_dataset.reliabilityPipelineReport = {};
+        emit resultsChanged(m_dataset.results);
+        emit reliabilityChanged(CalibrationResult{});
+        emit matrixChanged(CalibrationResult{});
+        emit statusChanged(modeChanged ? QStringLiteral("标定模式或输入模式已切换，已清除不兼容结果。")
+                                       : QStringLiteral("可靠性阈值已变化，结果需要重新评价。"));
     } else {
         emit statusChanged(QStringLiteral("输入规范已更新，已有规范化样本保持不变。"));
     }
@@ -111,20 +122,33 @@ void CalibrationController::updateInputSpec(const PoseInputSpec &spec, const QSt
                                              const QString &camera)
 {
     synchronizeParameters(spec, robot, camera, m_dataset.boardSpec, m_dataset.cameraIntrinsics,
-                          m_dataset.passRotationRmseDeg, m_dataset.passTranslationRmseM);
+                          m_dataset.passRotationRmseDeg, m_dataset.passTranslationRmseM,
+                          m_dataset.mode, m_dataset.inputMode);
 }
 
 void CalibrationController::updateImageProcessing(const BoardSpec &board,
                                                    const CameraIntrinsics &intrinsics)
 {
     synchronizeParameters(m_dataset.inputSpec, m_dataset.robotName, m_dataset.cameraName, board, intrinsics,
-                          m_dataset.passRotationRmseDeg, m_dataset.passTranslationRmseM);
+                          m_dataset.passRotationRmseDeg, m_dataset.passTranslationRmseM,
+                          m_dataset.mode, m_dataset.inputMode);
 }
 
 void CalibrationController::updateReliabilityThresholds(double rotationRmseDeg, double translationRmseM)
 {
     synchronizeParameters(m_dataset.inputSpec, m_dataset.robotName, m_dataset.cameraName, m_dataset.boardSpec,
-                          m_dataset.cameraIntrinsics, rotationRmseDeg, translationRmseM);
+                          m_dataset.cameraIntrinsics, rotationRmseDeg, translationRmseM,
+                          m_dataset.mode, m_dataset.inputMode);
+}
+
+void CalibrationController::recordBoardPdfReport(const BoardPdfReport &report)
+{
+    if (!report.success) return;
+    m_dataset.lastBoardPdfReport = report;
+    ++m_dataset.revision;
+    emit statusChanged((report.reused ? QStringLiteral("已复用同规格标定板 PDF：%1")
+                                      : QStringLiteral("标定板 PDF 已生成：%1"))
+                           .arg(report.outputPath));
 }
 
 void CalibrationController::emitDatasetChanged()
@@ -209,6 +233,15 @@ void CalibrationController::applyResiduals(const AxXbReport &report)
             if (residual.sampleId == sample.id) {
                 sample.rotationResidualDeg = residual.rotationErrorDeg;
                 sample.translationResidualM = residual.translationErrorM;
+                sample.outlier = residual.outlier;
+                break;
+            }
+        }
+    }
+    for (PointSample &sample : m_dataset.pointSamples) {
+        for (const SampleResidual &residual : report.sampleResiduals) {
+            if (residual.sampleId == sample.id) {
+                sample.residualM = residual.translationErrorM;
                 sample.outlier = residual.outlier;
                 break;
             }
@@ -662,7 +695,7 @@ bool CalibrationController::applyManualPoseInputs(const QVector<ManualPoseInput>
     }
 
     CalibrationDataset candidate = m_dataset;
-    candidate.mode = CalibrationMode::EyeInHand;
+    candidate.mode = m_dataset.mode;
     candidate.inputMode = CalibrationInputMode::PosePairs;
     candidate.inputSpec = spec;
     candidate.inputSpec.direction = PoseDirection::GripperToBase;
@@ -678,7 +711,7 @@ bool CalibrationController::applyManualPoseInputs(const QVector<ManualPoseInput>
     }
 
     m_dataset.inputSpec = candidate.inputSpec;
-    m_dataset.mode = CalibrationMode::EyeInHand;
+    m_dataset.mode = candidate.mode;
     m_dataset.inputMode = CalibrationInputMode::PosePairs;
     m_dataset.samples = samples;
     m_dataset.pointSamples.clear();
@@ -759,7 +792,7 @@ bool CalibrationController::applyManualPointInputs(const QVector<PointSample> &i
         return false;
     }
 
-    m_dataset.mode = CalibrationMode::EyeInHand;
+    // Keep the mode selected on the parameters page; point data is valid for both modes.
     m_dataset.inputMode = CalibrationInputMode::FixedPoint3D;
     m_dataset.inputSpec = spec;
     m_dataset.inputSpec.direction = PoseDirection::GripperToBase;
@@ -781,7 +814,7 @@ bool CalibrationController::applyManualPointInputs(const QVector<PointSample> &i
 FixedTargetPoseReport CalibrationController::computeFixedTargetPose(const CalibrationResult &result,
                                                                      int referenceSampleId)
 {
-    if (m_dataset.inputMode != CalibrationInputMode::PosePairs || !result.success) {
+    if (m_dataset.mode == CalibrationMode::EyeToHand || m_dataset.inputMode != CalibrationInputMode::PosePairs || !result.success) {
         FixedTargetPoseReport report;
         report.errors << QStringLiteral("当前需要成功的 PosePairs 结果才能计算 fixed target pose。");
         return report;
@@ -805,7 +838,12 @@ CalibrationResult CalibrationController::optimizeRecommendedResult()
 {
     CalibrationResult optimized;
     const CalibrationResult seed = recommendedResult();
-    if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+    if (m_dataset.mode == CalibrationMode::EyeToHand) {
+        if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D)
+            optimized = EyeToHandCalibrationService::calibrate(m_dataset, CalibrationMethod::Nonlinear);
+        else
+            optimized = EyeToHandCalibrationService::calibrate(m_dataset, CalibrationMethod::Nonlinear);
+    } else if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
         optimized = PointCalibrationService::calibrate(m_dataset);
     } else {
         if (!seed.success) {
@@ -847,7 +885,6 @@ PoseQualityReport CalibrationController::evaluatePoseQuality() const
 
 void CalibrationController::calculateSelected(CalibrationMethod method)
 {
-    m_dataset.mode = CalibrationMode::EyeInHand;
     if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
         if (m_dataset.pointSamples.size() < 5) {
             emit error(QStringLiteral("无法计算"), QStringLiteral("FixedPoint3D 至少需要 5 组点基样本。"));
@@ -875,10 +912,11 @@ void CalibrationController::calculateSelected(CalibrationMethod method)
             emit calculationFinished();
             watcher->deleteLater();
         });
-        watcher->setFuture(QtConcurrent::run([dataset]() {
-            return PointCalibrationService::calibrate(dataset);
+        watcher->setFuture(QtConcurrent::run([dataset, method]() {
+            return dataset.mode == CalibrationMode::EyeToHand
+                       ? EyeToHandCalibrationService::calibrate(dataset, method)
+                       : PointCalibrationService::calibrate(dataset);
         }));
-        Q_UNUSED(method)
         return;
     }
     if (!ensureTargetPosesReady()) return;
@@ -914,7 +952,9 @@ void CalibrationController::calculateSelected(CalibrationMethod method)
         watcher->deleteLater();
     });
     watcher->setFuture(QtConcurrent::run([dataset, method]() {
-        return CalibrationService::calibrate(dataset, method);
+        return dataset.mode == CalibrationMode::EyeToHand
+                   ? EyeToHandCalibrationService::calibrate(dataset, method)
+                   : CalibrationService::calibrate(dataset, method);
     }));
 }
 
@@ -924,7 +964,6 @@ void CalibrationController::calculateAll()
         calculateSelected(CalibrationMethod::PointBased);
         return;
     }
-    m_dataset.mode = CalibrationMode::EyeInHand;
     if (!ensureTargetPosesReady()) return;
     const ValidationReport validation = validateDataset(m_dataset);
     if (!validation.valid) {
@@ -970,7 +1009,9 @@ void CalibrationController::calculateAll()
         watcher->deleteLater();
     });
     watcher->setFuture(QtConcurrent::run([dataset]() {
-        return CalibrationService::calibrateAll(dataset);
+        return dataset.mode == CalibrationMode::EyeToHand
+                   ? EyeToHandCalibrationService::calibrateAll(dataset)
+                   : CalibrationService::calibrateAll(dataset);
     }));
 }
 

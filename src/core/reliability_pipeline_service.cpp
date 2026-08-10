@@ -1,6 +1,7 @@
 #include "core/reliability_pipeline_service.h"
 
 #include "core/calibration_service.h"
+#include "core/eye_to_hand_calibration_service.h"
 #include "core/dataset_validator.h"
 #include "core/matrix_utils.h"
 #include "core/nonlinear_optimizer.h"
@@ -48,6 +49,8 @@ CalibrationResult chooseResult(const QVector<CalibrationResult> &results)
 
 QVector<CalibrationResult> calculateResults(const CalibrationDataset &dataset)
 {
+    if (dataset.mode == CalibrationMode::EyeToHand)
+        return EyeToHandCalibrationService::calibrateAll(dataset);
     if (dataset.inputMode == CalibrationInputMode::FixedPoint3D)
         return {PointCalibrationService::calibrate(dataset)};
     return CalibrationService::calibrateAll(dataset);
@@ -152,6 +155,10 @@ CalibrationResult refineForVerification(const CalibrationDataset &dataset,
                                         const CalibrationResult &raw)
 {
     if (!raw.success) return raw;
+    if (dataset.mode == CalibrationMode::EyeToHand)
+        return EyeToHandCalibrationService::calibrate(
+            dataset, dataset.inputMode == CalibrationInputMode::FixedPoint3D
+                         ? CalibrationMethod::PointBased : CalibrationMethod::Nonlinear);
     if (dataset.inputMode == CalibrationInputMode::PosePairs)
         return NonlinearOptimizer::refinePose(dataset, raw);
     return raw;
@@ -246,9 +253,14 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
     }
 
     CalibrationMethod method = finalResult.seedMethod;
-    if (method == CalibrationMethod::Nonlinear) method = CalibrationMethod::Tsai;
+    const bool eyeToHand = dataset.mode == CalibrationMode::EyeToHand;
+    if (method == CalibrationMethod::Nonlinear)
+        method = eyeToHand ? CalibrationMethod::RobotWorldShah : CalibrationMethod::Tsai;
+    if (eyeToHand && method != CalibrationMethod::RobotWorldLi)
+        method = CalibrationMethod::RobotWorldShah;
     report.baseMethod = method;
-    const cv::Matx44d reference = matrix::toMat(finalResult.cameraToGripper);
+    const cv::Matx44d reference = matrix::toMat(eyeToHand ? finalResult.cameraToBase
+                                                          : finalResult.cameraToGripper);
     const Vector3 referenceTranslation{reference(0, 3), reference(1, 3), reference(2, 3)};
     QVector<Vector3> rotationSamples;
     QVector<Vector3> translationSamples;
@@ -286,19 +298,23 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
 
         CalibrationResult sampled;
         if (dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
-            sampled = PointCalibrationService::calibrate(resampled);
+            sampled = eyeToHand ? EyeToHandCalibrationService::calibrate(resampled, CalibrationMethod::PointBased)
+                                : PointCalibrationService::calibrate(resampled);
             if (sampled.success) {
                 ++report.rawSuccessfulResamples;
                 ++report.nonlinearSuccessfulResamples;
             }
         } else {
-            const CalibrationResult raw = CalibrationService::calibrate(resampled, method);
+            const CalibrationResult raw = eyeToHand
+                                              ? EyeToHandCalibrationService::calibrate(resampled, method)
+                                              : CalibrationService::calibrate(resampled, method);
             if (!raw.success) {
                 ++report.invalidResamples;
                 continue;
             }
             ++report.rawSuccessfulResamples;
-            sampled = NonlinearOptimizer::refinePose(resampled, raw);
+            sampled = eyeToHand ? EyeToHandCalibrationService::calibrate(resampled, CalibrationMethod::Nonlinear)
+                                : NonlinearOptimizer::refinePose(resampled, raw);
             if (!sampled.success) {
                 ++report.invalidResamples;
                 continue;
@@ -310,7 +326,7 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
             continue;
         }
 
-        const cv::Matx44d pose = matrix::toMat(sampled.cameraToGripper);
+        const cv::Matx44d pose = matrix::toMat(eyeToHand ? sampled.cameraToBase : sampled.cameraToGripper);
         const Vector3 rotation = matrix::toRodrigues(reference.get_minor<3, 3>(0, 0).t()
                                                       * pose.get_minor<3, 3>(0, 0));
         rotationSamples.append({rotation[0] * 180.0 / kPi, rotation[1] * 180.0 / kPi,
@@ -389,20 +405,83 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
     QElapsedTimer timer;
     timer.start();
 
-    if (dataset.mode == CalibrationMode::EyeToHand) {
-        execution.report.errors << QStringLiteral("Eye-To-Hand 当前仍未完成，可靠性流水线已停止。");
-        addStage(&execution.report, QStringLiteral("运动激励检查"), PipelineStageState::Failed,
-                 execution.report.errors.last());
-        execution.report.message = execution.report.errors.last();
-        execution.report.elapsedMs = timer.elapsed();
-        return execution;
-    }
     if (sampleCount(dataset) < 5) {
         execution.report.errors << QStringLiteral("可靠性流水线至少需要 5 组样本。");
         addStage(&execution.report, QStringLiteral("运动激励检查"), PipelineStageState::Failed,
                  execution.report.errors.last());
         execution.report.message = execution.report.errors.last();
         execution.report.elapsedMs = timer.elapsed();
+        return execution;
+    }
+
+    if (dataset.mode == CalibrationMode::EyeToHand) {
+        CalibrationDataset working = dataset;
+        execution.report.qualityReport = working.inputMode == CalibrationInputMode::FixedPoint3D
+                                             ? PoseQualityService::evaluatePointQuality(working)
+                                             : PoseQualityService::evaluatePoseQuality(working);
+        addStage(&execution.report, QStringLiteral("运动激励检查"),
+                 execution.report.qualityReport.calculable ? PipelineStageState::Passed : PipelineStageState::Warning,
+                 QStringLiteral("Eye-To-Hand 样本 %1，最大相对旋转 %2°。")
+                     .arg(sampleCount(working)).arg(execution.report.qualityReport.maxRelativeRotationDeg, 0, 'f', 2));
+        QVector<CalibrationResult> rawResults = calculateResults(working);
+        CalibrationResult best = chooseResult(rawResults);
+        if (!best.success) {
+            execution.report.errors << QStringLiteral("Robot-World 或点基 Eye-To-Hand 算法无法求解。");
+            addStage(&execution.report, QStringLiteral("AX=YB / 点基计算"), PipelineStageState::Failed,
+                     execution.report.errors.last());
+            execution.report.message = execution.report.errors.last();
+            execution.report.elapsedMs = timer.elapsed();
+            return execution;
+        }
+        addStage(&execution.report, QStringLiteral("AX=YB / 点基计算"), PipelineStageState::Passed,
+                 QStringLiteral("推荐方法：%1。" ).arg(methodName(best.method)));
+        const QSet<int> verifiedRemoved = verifyAndRemoveOutliers(&working, {}, &execution.report);
+        if (!verifiedRemoved.isEmpty()) {
+            rawResults = calculateResults(working);
+            best = chooseResult(rawResults);
+            addStage(&execution.report, QStringLiteral("异常样本逐个验证"), PipelineStageState::Passed,
+                     QStringLiteral("已验证并剔除 %1 个 Eye-To-Hand 样本。" ).arg(verifiedRemoved.size()));
+        } else {
+            addStage(&execution.report, QStringLiteral("异常样本逐个验证"), PipelineStageState::Passed,
+                     QStringLiteral("未发现可接受的异常样本剔除项。"));
+        }
+        CalibrationResult finalResult = EyeToHandCalibrationService::calibrate(
+            working, working.inputMode == CalibrationInputMode::FixedPoint3D
+                          ? CalibrationMethod::PointBased : CalibrationMethod::Nonlinear);
+        addStage(&execution.report, QStringLiteral("归一化 Huber 优化"),
+                 finalResult.success ? PipelineStageState::Passed : PipelineStageState::Warning,
+                 finalResult.optimizationReport.message);
+        execution.report.finalMethod = finalResult.method;
+        execution.report.finalCameraToBase = finalResult.cameraToBase;
+        execution.report.finalTargetToGripper = finalResult.targetToGripper;
+        execution.report.finalPointInGripper = finalResult.pointInGripper;
+        execution.report.eyeToHandPoseReport = finalResult.eyeToHandPoseReport;
+        execution.report.eyeToHandPointReport = finalResult.eyeToHandPointReport;
+        execution.report.axXbReport = finalResult.axXbReport;
+        execution.report.fixedPointReport = finalResult.fixedPointReport;
+        execution.report.optimizationReport = finalResult.optimizationReport;
+        finalResult.bootstrapReport = bootstrap(working, finalResult, bootstrapResamples, confidenceLevel);
+        execution.report.bootstrapReport = finalResult.bootstrapReport;
+        addStage(&execution.report, QStringLiteral("Bootstrap 重采样"),
+                 finalResult.bootstrapReport.success ? PipelineStageState::Passed : PipelineStageState::Warning,
+                 finalResult.bootstrapReport.message);
+        finalResult.recommended = true;
+        QVector<CalibrationResult> storedResults = rawResults;
+        for (CalibrationResult &result : storedResults) result.recommended = false;
+        storedResults.append(finalResult);
+        working.results = storedResults;
+        working.reliabilityPipelineReport = execution.report;
+        execution.refinedDataset = working;
+        execution.finalResult = finalResult;
+        execution.report.finalSampleCount = sampleCount(working);
+        execution.report.success = finalResult.success;
+        execution.report.passed = finalResult.success && finalResult.axXbReport.passed;
+        execution.report.message = execution.report.passed
+                                       ? QStringLiteral("Eye-To-Hand 可靠性流水线完成，结果通过。")
+                                       : QStringLiteral("Eye-To-Hand 可靠性流水线完成，但结果存在警告。" );
+        execution.report.completedAt = QDateTime::currentDateTime();
+        execution.report.elapsedMs = timer.elapsed();
+        execution.refinedDataset.reliabilityPipelineReport = execution.report;
         return execution;
     }
 

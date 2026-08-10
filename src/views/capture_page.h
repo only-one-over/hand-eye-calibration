@@ -17,9 +17,11 @@ public:
 signals:
     void uploadRobotRequested();
     void uploadImagesRequested();
+    void generateBoardRequested();
     void processRequested();
     void viewDataRequested();
     void viewResultsRequested();
+    void nextRequested();
 
 public slots:
     void setSummary(int sampleCount, int imageCount, int targetPoseCount);

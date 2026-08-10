@@ -7,6 +7,7 @@
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
+class QPushButton;
 class QSpinBox;
 class QDoubleSpinBox;
 class QTableWidget;
@@ -48,6 +49,8 @@ private slots:
 private:
     ResultTableModel *m_model = nullptr;
     QTableView *m_table = nullptr;
+    QPushButton *m_calculateAllButton = nullptr;
+    QPushButton *m_fixedTargetButton = nullptr;
     QLabel *m_reliability = nullptr;
     QLabel *m_axXbReport = nullptr;
     QLabel *m_fixedTargetReport = nullptr;
