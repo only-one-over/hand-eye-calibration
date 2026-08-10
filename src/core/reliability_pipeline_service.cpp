@@ -1,6 +1,7 @@
 #include "core/reliability_pipeline_service.h"
 
 #include "core/calibration_service.h"
+#include "core/eye_to_hand_calibration_service.h"
 #include "core/dataset_validator.h"
 #include "core/matrix_utils.h"
 #include "core/nonlinear_optimizer.h"
@@ -8,6 +9,7 @@
 #include "core/pose_quality_service.h"
 
 #include <QElapsedTimer>
+#include <QHash>
 #include <QRandomGenerator>
 #include <QSet>
 
@@ -47,6 +49,8 @@ CalibrationResult chooseResult(const QVector<CalibrationResult> &results)
 
 QVector<CalibrationResult> calculateResults(const CalibrationDataset &dataset)
 {
+    if (dataset.mode == CalibrationMode::EyeToHand)
+        return EyeToHandCalibrationService::calibrateAll(dataset);
     if (dataset.inputMode == CalibrationInputMode::FixedPoint3D)
         return {PointCalibrationService::calibrate(dataset)};
     return CalibrationService::calibrateAll(dataset);
@@ -84,24 +88,38 @@ PnpQualityReport evaluatePnp(const CalibrationDataset &dataset)
     return report;
 }
 
-QSet<int> outlierIds(const CalibrationDataset &dataset, const CalibrationResult &result,
-                     const PnpQualityReport &pnp)
+QVector<int> outlierIds(const CalibrationDataset &dataset, const CalibrationResult &result,
+                        const PnpQualityReport &pnp)
 {
-    QSet<int> ids;
+    QHash<int, double> scores;
+    const auto addCandidate = [&scores](int id, double score) {
+        scores[id] = std::max(scores.value(id, 0.0), score);
+    };
     if (dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
         for (const FixedPointSample &sample : result.fixedPointReport.samples)
-            if (sample.outlier) ids.insert(sample.sampleId);
-        return ids;
-    }
-    for (const SampleResidual &sample : result.trainingReport.sampleResiduals)
-        if (sample.outlier) ids.insert(sample.sampleId);
-    if (pnp.available) {
-        for (const PoseSample &sample : dataset.samples) {
-            if (sample.imageStatus == ImageSampleStatus::PoseEstimated
-                && sample.pnpReprojectionRmsePx > pnp.thresholdPx)
-                ids.insert(sample.id);
+            if (sample.outlier) addCandidate(sample.sampleId, sample.residualM / 0.001);
+    } else {
+        for (const SampleResidual &sample : result.axXbReport.sampleResiduals)
+            if (sample.outlier) addCandidate(sample.sampleId, sample.normalizedScore);
+        if (pnp.available) {
+            const double threshold = std::max(pnp.thresholdPx, 1e-9);
+            for (const PoseSample &sample : dataset.samples) {
+                if (sample.imageStatus == ImageSampleStatus::PoseEstimated
+                    && sample.pnpReprojectionRmsePx > pnp.thresholdPx)
+                    addCandidate(sample.id, sample.pnpReprojectionRmsePx / threshold);
+            }
         }
     }
+    QVector<int> ids;
+    ids.reserve(scores.size());
+    for (auto iterator = scores.cbegin(); iterator != scores.cend(); ++iterator)
+        ids.append(iterator.key());
+    std::sort(ids.begin(), ids.end(), [&scores](int left, int right) {
+        const double leftScore = scores.value(left);
+        const double rightScore = scores.value(right);
+        if (std::abs(leftScore - rightScore) > 1e-12) return leftScore > rightScore;
+        return left < right;
+    });
     return ids;
 }
 
@@ -119,6 +137,87 @@ void removeOutliers(CalibrationDataset *dataset, const QSet<int> &ids)
     for (const PoseSample &sample : std::as_const(dataset->samples))
         if (!ids.contains(sample.id)) kept.append(sample);
     dataset->samples = kept;
+}
+
+double normalizedLoss(const CalibrationResult &result)
+{
+    if (result.optimizationReport.available)
+        return result.optimizationReport.normalizedHuberLossAfter;
+    if (result.fixedPointReport.available)
+        return std::pow(result.fixedPointReport.rmseM / 0.001, 2.0);
+    double loss = 0.0;
+    for (const SampleResidual &sample : result.axXbReport.sampleResiduals)
+        loss += sample.normalizedScore * sample.normalizedScore;
+    return loss;
+}
+
+CalibrationResult refineForVerification(const CalibrationDataset &dataset,
+                                        const CalibrationResult &raw)
+{
+    if (!raw.success) return raw;
+    if (dataset.mode == CalibrationMode::EyeToHand)
+        return EyeToHandCalibrationService::calibrate(
+            dataset, dataset.inputMode == CalibrationInputMode::FixedPoint3D
+                         ? CalibrationMethod::PointBased : CalibrationMethod::Nonlinear);
+    if (dataset.inputMode == CalibrationInputMode::PosePairs)
+        return NonlinearOptimizer::refinePose(dataset, raw);
+    return raw;
+}
+
+QSet<int> verifyAndRemoveOutliers(CalibrationDataset *dataset,
+                                  const PnpQualityReport &pnp,
+                                  ReliabilityPipelineReport *report)
+{
+    QSet<int> accepted;
+    if (!dataset || !report) return accepted;
+    CalibrationResult current = chooseResult(calculateResults(*dataset));
+    current = refineForVerification(*dataset, current);
+    if (!current.success) return accepted;
+    double currentLoss = normalizedLoss(current);
+    while (sampleCount(*dataset) >= 5) {
+        const QVector<int> candidates = outlierIds(*dataset, current, pnp);
+        if (candidates.isEmpty()) break;
+        for (int id : candidates) {
+            if (!report->candidateSampleIds.contains(id)) report->candidateSampleIds.append(id);
+        }
+        bool removedOne = false;
+        for (int id : candidates) {
+            if (sampleCount(*dataset) - 1 < 5) break;
+            CalibrationDataset candidateDataset = *dataset;
+            removeOutliers(&candidateDataset, QSet<int>{id});
+            CalibrationResult candidate = chooseResult(calculateResults(candidateDataset));
+            candidate = refineForVerification(candidateDataset, candidate);
+            OutlierValidationStep step;
+            step.sampleId = id;
+            step.beforeLoss = currentLoss;
+            step.afterLoss = candidate.success ? normalizedLoss(candidate) : currentLoss;
+            const bool noNewSevereOutliers = candidate.success
+                                              && candidate.axXbReport.outlierCount
+                                                     <= current.axXbReport.outlierCount;
+            step.accepted = candidate.success && step.afterLoss + 1e-9 < currentLoss
+                            && noNewSevereOutliers;
+            step.message = step.accepted
+                               ? QStringLiteral("单样本重算后损失下降，已剔除。")
+                               : candidate.success
+                                     ? QStringLiteral("单样本重算未达到改善条件，保留。")
+                                     : QStringLiteral("剔除后无法求解，保留。 ");
+            report->outlierValidation.append(step);
+            if (!step.accepted) {
+                if (!report->retainedOutlierIds.contains(id)) report->retainedOutlierIds.append(id);
+                continue;
+            }
+            removeOutliers(dataset, QSet<int>{id});
+            accepted.insert(id);
+            report->removedSampleIds.append(id);
+            report->autoRemovedCount = accepted.size();
+            current = candidate;
+            currentLoss = step.afterLoss;
+            removedOne = true;
+            break;
+        }
+        if (!removedOne) break;
+    }
+    return accepted;
 }
 
 double percentile(QVector<double> values, double probability)
@@ -153,10 +252,15 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
         return report;
     }
 
-    CalibrationMethod method = finalResult.method;
+    CalibrationMethod method = finalResult.seedMethod;
+    const bool eyeToHand = dataset.mode == CalibrationMode::EyeToHand;
     if (method == CalibrationMethod::Nonlinear)
-        method = CalibrationMethod::Tsai;
-    const cv::Matx44d reference = matrix::toMat(finalResult.cameraToGripper);
+        method = eyeToHand ? CalibrationMethod::RobotWorldShah : CalibrationMethod::Tsai;
+    if (eyeToHand && method != CalibrationMethod::RobotWorldLi)
+        method = CalibrationMethod::RobotWorldShah;
+    report.baseMethod = method;
+    const cv::Matx44d reference = matrix::toMat(eyeToHand ? finalResult.cameraToBase
+                                                          : finalResult.cameraToGripper);
     const Vector3 referenceTranslation{reference(0, 3), reference(1, 3), reference(2, 3)};
     QVector<Vector3> rotationSamples;
     QVector<Vector3> translationSamples;
@@ -166,30 +270,63 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
 
     for (int iteration = 0; iteration < report.requestedResamples; ++iteration) {
         CalibrationDataset resampled = dataset;
+        QSet<int> sourceIds;
         if (dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
             resampled.pointSamples.clear();
             for (int index = 0; index < count; ++index) {
-                PointSample sample = dataset.pointSamples.at(static_cast<int>(generator.bounded(count)));
+                const int sourceIndex = static_cast<int>(generator.bounded(count));
+                PointSample sample = dataset.pointSamples.at(sourceIndex);
+                sourceIds.insert(sample.id);
                 sample.id = index + 1;
                 resampled.pointSamples.append(sample);
             }
         } else {
             resampled.samples.clear();
             for (int index = 0; index < count; ++index) {
-                PoseSample sample = dataset.samples.at(static_cast<int>(generator.bounded(count)));
+                const int sourceIndex = static_cast<int>(generator.bounded(count));
+                PoseSample sample = dataset.samples.at(sourceIndex);
+                sourceIds.insert(sample.id);
                 sample.id = index + 1;
                 resampled.samples.append(sample);
             }
         }
 
-        CalibrationResult sampled;
-        if (dataset.inputMode == CalibrationInputMode::FixedPoint3D)
-            sampled = PointCalibrationService::calibrate(resampled);
-        else
-            sampled = CalibrationService::calibrate(resampled, method);
-        if (!sampled.success) continue;
+        if (sourceIds.size() < 5) {
+            ++report.invalidResamples;
+            continue;
+        }
 
-        const cv::Matx44d pose = matrix::toMat(sampled.cameraToGripper);
+        CalibrationResult sampled;
+        if (dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+            sampled = eyeToHand ? EyeToHandCalibrationService::calibrate(resampled, CalibrationMethod::PointBased)
+                                : PointCalibrationService::calibrate(resampled);
+            if (sampled.success) {
+                ++report.rawSuccessfulResamples;
+                ++report.nonlinearSuccessfulResamples;
+            }
+        } else {
+            const CalibrationResult raw = eyeToHand
+                                              ? EyeToHandCalibrationService::calibrate(resampled, method)
+                                              : CalibrationService::calibrate(resampled, method);
+            if (!raw.success) {
+                ++report.invalidResamples;
+                continue;
+            }
+            ++report.rawSuccessfulResamples;
+            sampled = eyeToHand ? EyeToHandCalibrationService::calibrate(resampled, CalibrationMethod::Nonlinear)
+                                : NonlinearOptimizer::refinePose(resampled, raw);
+            if (!sampled.success) {
+                ++report.invalidResamples;
+                continue;
+            }
+            ++report.nonlinearSuccessfulResamples;
+        }
+        if (!sampled.success) {
+            ++report.invalidResamples;
+            continue;
+        }
+
+        const cv::Matx44d pose = matrix::toMat(eyeToHand ? sampled.cameraToBase : sampled.cameraToGripper);
         const Vector3 rotation = matrix::toRodrigues(reference.get_minor<3, 3>(0, 0).t()
                                                       * pose.get_minor<3, 3>(0, 0));
         rotationSamples.append({rotation[0] * 180.0 / kPi, rotation[1] * 180.0 / kPi,
@@ -244,8 +381,8 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
     }
     report.rotationNormStdDeg = std::sqrt(rotationNormSquared * inverseCount);
     report.translationNormStdM = std::sqrt(translationNormSquared * inverseCount);
-    report.confidenceScore = 100.0 * static_cast<double>(report.successfulResamples)
-                             / static_cast<double>(report.requestedResamples);
+    report.successRate = static_cast<double>(report.successfulResamples)
+                         / static_cast<double>(report.requestedResamples);
     report.message = QStringLiteral("Bootstrap 完成：%1/%2 次成功，置信水平 %3%。")
                          .arg(report.successfulResamples).arg(report.requestedResamples)
                          .arg(report.confidenceLevel * 100.0, 0, 'f', 1);
@@ -268,20 +405,83 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
     QElapsedTimer timer;
     timer.start();
 
-    if (dataset.mode == CalibrationMode::EyeToHand) {
-        execution.report.errors << QStringLiteral("Eye-To-Hand 当前仍未完成，可靠性流水线已停止。");
-        addStage(&execution.report, QStringLiteral("运动激励检查"), PipelineStageState::Failed,
-                 execution.report.errors.last());
-        execution.report.message = execution.report.errors.last();
-        execution.report.elapsedMs = timer.elapsed();
-        return execution;
-    }
     if (sampleCount(dataset) < 5) {
         execution.report.errors << QStringLiteral("可靠性流水线至少需要 5 组样本。");
         addStage(&execution.report, QStringLiteral("运动激励检查"), PipelineStageState::Failed,
                  execution.report.errors.last());
         execution.report.message = execution.report.errors.last();
         execution.report.elapsedMs = timer.elapsed();
+        return execution;
+    }
+
+    if (dataset.mode == CalibrationMode::EyeToHand) {
+        CalibrationDataset working = dataset;
+        execution.report.qualityReport = working.inputMode == CalibrationInputMode::FixedPoint3D
+                                             ? PoseQualityService::evaluatePointQuality(working)
+                                             : PoseQualityService::evaluatePoseQuality(working);
+        addStage(&execution.report, QStringLiteral("运动激励检查"),
+                 execution.report.qualityReport.calculable ? PipelineStageState::Passed : PipelineStageState::Warning,
+                 QStringLiteral("Eye-To-Hand 样本 %1，最大相对旋转 %2°。")
+                     .arg(sampleCount(working)).arg(execution.report.qualityReport.maxRelativeRotationDeg, 0, 'f', 2));
+        QVector<CalibrationResult> rawResults = calculateResults(working);
+        CalibrationResult best = chooseResult(rawResults);
+        if (!best.success) {
+            execution.report.errors << QStringLiteral("Robot-World 或点基 Eye-To-Hand 算法无法求解。");
+            addStage(&execution.report, QStringLiteral("AX=YB / 点基计算"), PipelineStageState::Failed,
+                     execution.report.errors.last());
+            execution.report.message = execution.report.errors.last();
+            execution.report.elapsedMs = timer.elapsed();
+            return execution;
+        }
+        addStage(&execution.report, QStringLiteral("AX=YB / 点基计算"), PipelineStageState::Passed,
+                 QStringLiteral("推荐方法：%1。" ).arg(methodName(best.method)));
+        const QSet<int> verifiedRemoved = verifyAndRemoveOutliers(&working, {}, &execution.report);
+        if (!verifiedRemoved.isEmpty()) {
+            rawResults = calculateResults(working);
+            best = chooseResult(rawResults);
+            addStage(&execution.report, QStringLiteral("异常样本逐个验证"), PipelineStageState::Passed,
+                     QStringLiteral("已验证并剔除 %1 个 Eye-To-Hand 样本。" ).arg(verifiedRemoved.size()));
+        } else {
+            addStage(&execution.report, QStringLiteral("异常样本逐个验证"), PipelineStageState::Passed,
+                     QStringLiteral("未发现可接受的异常样本剔除项。"));
+        }
+        CalibrationResult finalResult = EyeToHandCalibrationService::calibrate(
+            working, working.inputMode == CalibrationInputMode::FixedPoint3D
+                          ? CalibrationMethod::PointBased : CalibrationMethod::Nonlinear);
+        addStage(&execution.report, QStringLiteral("归一化 Huber 优化"),
+                 finalResult.success ? PipelineStageState::Passed : PipelineStageState::Warning,
+                 finalResult.optimizationReport.message);
+        execution.report.finalMethod = finalResult.method;
+        execution.report.finalCameraToBase = finalResult.cameraToBase;
+        execution.report.finalTargetToGripper = finalResult.targetToGripper;
+        execution.report.finalPointInGripper = finalResult.pointInGripper;
+        execution.report.eyeToHandPoseReport = finalResult.eyeToHandPoseReport;
+        execution.report.eyeToHandPointReport = finalResult.eyeToHandPointReport;
+        execution.report.axXbReport = finalResult.axXbReport;
+        execution.report.fixedPointReport = finalResult.fixedPointReport;
+        execution.report.optimizationReport = finalResult.optimizationReport;
+        finalResult.bootstrapReport = bootstrap(working, finalResult, bootstrapResamples, confidenceLevel);
+        execution.report.bootstrapReport = finalResult.bootstrapReport;
+        addStage(&execution.report, QStringLiteral("Bootstrap 重采样"),
+                 finalResult.bootstrapReport.success ? PipelineStageState::Passed : PipelineStageState::Warning,
+                 finalResult.bootstrapReport.message);
+        finalResult.recommended = true;
+        QVector<CalibrationResult> storedResults = rawResults;
+        for (CalibrationResult &result : storedResults) result.recommended = false;
+        storedResults.append(finalResult);
+        working.results = storedResults;
+        working.reliabilityPipelineReport = execution.report;
+        execution.refinedDataset = working;
+        execution.finalResult = finalResult;
+        execution.report.finalSampleCount = sampleCount(working);
+        execution.report.success = finalResult.success;
+        execution.report.passed = finalResult.success && finalResult.axXbReport.passed;
+        execution.report.message = execution.report.passed
+                                       ? QStringLiteral("Eye-To-Hand 可靠性流水线完成，结果通过。")
+                                       : QStringLiteral("Eye-To-Hand 可靠性流水线完成，但结果存在警告。" );
+        execution.report.completedAt = QDateTime::currentDateTime();
+        execution.report.elapsedMs = timer.elapsed();
+        execution.refinedDataset.reliabilityPipelineReport = execution.report;
         return execution;
     }
 
@@ -333,10 +533,10 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
         return execution;
     }
     addStage(&execution.report, QStringLiteral("五算法计算"),
-             best.trainingReport.passed ? PipelineStageState::Passed : PipelineStageState::Warning,
+             best.axXbReport.passed ? PipelineStageState::Passed : PipelineStageState::Warning,
              QStringLiteral("推荐方法：%1，旋转 RMSE %2°，平移 RMSE %3 m。")
-                 .arg(methodName(best.method)).arg(best.trainingReport.rotationRmseDeg, 0, 'f', 5)
-                 .arg(best.trainingReport.translationRmseM, 0, 'f', 7));
+                 .arg(methodName(best.method)).arg(best.axXbReport.rotationRmseDeg, 0, 'f', 5)
+                 .arg(best.axXbReport.translationRmseM, 0, 'f', 7));
 
     if (working.inputMode == CalibrationInputMode::FixedPoint3D) {
         execution.report.fixedPointReport = best.fixedPointReport;
@@ -346,17 +546,17 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
                  QStringLiteral("FixedPoint3D 固定点 RMSE %1 m，最大 %2 m。")
                      .arg(best.fixedPointReport.rmseM, 0, 'f', 7)
                      .arg(best.fixedPointReport.maxErrorM, 0, 'f', 7));
-        execution.report.axXbReport = best.trainingReport;
+        execution.report.axXbReport = best.axXbReport;
         addStage(&execution.report, QStringLiteral("AX=XB 一致性"), PipelineStageState::Skipped,
                  QStringLiteral("FixedPoint3D 不使用 AX=XB 位姿对方程。"));
     } else {
-        execution.report.axXbReport = best.trainingReport;
+        execution.report.axXbReport = best.axXbReport;
         addStage(&execution.report, QStringLiteral("AX=XB 一致性"),
-                 best.trainingReport.passed ? PipelineStageState::Passed : PipelineStageState::Warning,
+                 best.axXbReport.passed ? PipelineStageState::Passed : PipelineStageState::Warning,
                  QStringLiteral("旋转 RMSE %1°，平移 RMSE %2 m，异常样本 %3。")
-                     .arg(best.trainingReport.rotationRmseDeg, 0, 'f', 5)
-                     .arg(best.trainingReport.translationRmseM, 0, 'f', 7)
-                     .arg(best.trainingReport.outlierCount));
+                     .arg(best.axXbReport.rotationRmseDeg, 0, 'f', 5)
+                     .arg(best.axXbReport.translationRmseM, 0, 'f', 7)
+                     .arg(best.axXbReport.outlierCount));
         execution.report.fixedTargetReport = best.fixedTargetReport;
         addStage(&execution.report, QStringLiteral("Fixed Target 一致性"),
                  best.fixedTargetReport.success && best.fixedTargetReport.outlierCount == 0
@@ -367,7 +567,16 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
                      .arg(best.fixedTargetReport.outlierCount));
     }
 
-    const QSet<int> candidates = outlierIds(working, best, execution.report.pnpReport);
+    const QSet<int> verifiedRemoved = verifyAndRemoveOutliers(&working, execution.report.pnpReport,
+                                                              &execution.report);
+    rawResults = calculateResults(working);
+    best = chooseResult(rawResults);
+    if (!verifiedRemoved.isEmpty()) {
+        addStage(&execution.report, QStringLiteral("Outlier single-sample verification"),
+                 PipelineStageState::Passed,
+                 QStringLiteral("已逐个验证并剔除 %1 个样本。 ").arg(verifiedRemoved.size()));
+    }
+    const QSet<int> candidates;
     const int minimumSamples = working.inputMode == CalibrationInputMode::FixedPoint3D ? 5 : 5;
     if (!candidates.isEmpty() && sampleCount(working) - candidates.size() >= minimumSamples) {
         for (int id : candidates) execution.report.removedSampleIds.append(id);
@@ -425,7 +634,7 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
     execution.report.optimizationReport = finalResult.optimizationReport;
     execution.report.fixedTargetReport = finalResult.fixedTargetReport;
     execution.report.fixedPointReport = finalResult.fixedPointReport;
-    execution.report.axXbReport = finalResult.trainingReport;
+    execution.report.axXbReport = finalResult.axXbReport;
 
     finalResult.bootstrapReport = bootstrap(working, finalResult, bootstrapResamples, confidenceLevel);
     execution.report.bootstrapReport = finalResult.bootstrapReport;
@@ -450,7 +659,7 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
     execution.refinedDataset.bootstrapConfidence = confidenceLevel;
     execution.report.finalSampleCount = sampleCount(working);
     execution.report.success = true;
-    execution.report.passed = finalResult.trainingReport.passed
+    execution.report.passed = finalResult.axXbReport.passed
                               && finalResult.bootstrapReport.success
                               && execution.report.errors.isEmpty();
     execution.report.message = execution.report.passed

@@ -35,11 +35,11 @@ CalibrationResultPage::CalibrationResultPage(QWidget *parent) : QWidget(parent)
     auto *actions = new QHBoxLayout;
     auto *calculateSelected = new QPushButton(QStringLiteral("计算当前算法"), this);
     calculateSelected->setObjectName(QStringLiteral("calculateSelectedButton"));
-    auto *calculateAll = new QPushButton(QStringLiteral("五种算法自动比较并推荐"), this);
-    calculateAll->setObjectName(QStringLiteral("calculateAllButton"));
-    calculateAll->setProperty("variant", "primary");
-    auto *fixedTarget = new QPushButton(QStringLiteral("计算 fixed target pose"), this);
-    fixedTarget->setObjectName(QStringLiteral("computeFixedTargetButton"));
+    m_calculateAllButton = new QPushButton(QStringLiteral("五种算法自动比较并推荐"), this);
+    m_calculateAllButton->setObjectName(QStringLiteral("calculateAllButton"));
+    m_calculateAllButton->setProperty("variant", "primary");
+    m_fixedTargetButton = new QPushButton(QStringLiteral("计算 fixed target pose"), this);
+    m_fixedTargetButton->setObjectName(QStringLiteral("computeFixedTargetButton"));
     auto *optimize = new QPushButton(QStringLiteral("非线性优化精修"), this);
     optimize->setObjectName(QStringLiteral("optimizeRecommendedButton"));
     optimize->setProperty("variant", "primary");
@@ -65,8 +65,8 @@ CalibrationResultPage::CalibrationResultPage(QWidget *parent) : QWidget(parent)
     actions->addWidget(new QLabel(QStringLiteral("reference ID"), this));
     actions->addWidget(m_referenceSample);
     actions->addWidget(calculateSelected);
-    actions->addWidget(calculateAll);
-    actions->addWidget(fixedTarget);
+    actions->addWidget(m_calculateAllButton);
+    actions->addWidget(m_fixedTargetButton);
     actions->addWidget(optimize);
     actions->addWidget(pipeline);
     actions->addWidget(new QLabel(QStringLiteral("Bootstrap 次数"), this));
@@ -77,8 +77,8 @@ CalibrationResultPage::CalibrationResultPage(QWidget *parent) : QWidget(parent)
     actions->addStretch();
     layout->addLayout(actions);
     connect(calculateSelected, &QPushButton::clicked, this, &CalibrationResultPage::calculateSelectedRequested);
-    connect(calculateAll, &QPushButton::clicked, this, &CalibrationResultPage::calculateAllRequested);
-    connect(fixedTarget, &QPushButton::clicked, this, [this] {
+    connect(m_calculateAllButton, &QPushButton::clicked, this, &CalibrationResultPage::calculateAllRequested);
+    connect(m_fixedTargetButton, &QPushButton::clicked, this, [this] {
         emit computeFixedTargetRequested(m_referenceSample->value());
     });
     connect(optimize, &QPushButton::clicked, this, &CalibrationResultPage::optimizeRequested);
@@ -113,7 +113,15 @@ CalibrationResultPage::CalibrationResultPage(QWidget *parent) : QWidget(parent)
     auto *details = new QHBoxLayout;
     m_reliability = new QLabel(QStringLiteral("可靠性报告将在计算后显示。"), this);
     m_reliability->setWordWrap(true);
-    details->addWidget(m_reliability, 1);
+    auto *reportColumn = new QVBoxLayout;
+    m_axXbReport = new QLabel(QStringLiteral("AX=XB 一致性：尚未计算。"), this);
+    m_axXbReport->setWordWrap(true);
+    m_fixedTargetReport = new QLabel(QStringLiteral("Fixed Target 一致性：尚未计算。"), this);
+    m_fixedTargetReport->setWordWrap(true);
+    reportColumn->addWidget(m_axXbReport);
+    reportColumn->addWidget(m_fixedTargetReport);
+    reportColumn->addWidget(m_reliability);
+    details->addLayout(reportColumn, 1);
     m_matrix = new QPlainTextEdit(this);
     m_matrix->setObjectName(QStringLiteral("resultMatrix"));
     m_matrix->setReadOnly(true);
@@ -176,6 +184,13 @@ void CalibrationResultPage::setReferenceSampleIds(const QVector<PoseSample> &sam
 void CalibrationResultPage::setResults(const QVector<CalibrationResult> &results)
 {
     m_model->setResults(results);
+    const bool eyeToHand = !results.isEmpty()
+                           && (results.first().eyeToHandPoseReport.available
+                               || results.first().eyeToHandPointReport.available);
+    if (m_calculateAllButton)
+        m_calculateAllButton->setText(eyeToHand ? QStringLiteral("Shah / Li / 非线性自动比较")
+                                                : QStringLiteral("五种算法自动比较并推荐"));
+    if (m_fixedTargetButton) m_fixedTargetButton->setVisible(!eyeToHand);
     for (int index = 0; index < results.size(); ++index) {
         if (results.at(index).recommended) {
             m_table->selectRow(index);
@@ -193,17 +208,108 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
 {
     if (!result.success) {
         m_reliability->setText(result.message.isEmpty() ? QStringLiteral("尚未生成可靠性报告。") : result.message);
+        m_axXbReport->setText(QStringLiteral("AX=XB 一致性：尚未计算。"));
+        m_fixedTargetReport->setText(QStringLiteral("Fixed Target 一致性：尚未计算。"));
         return;
     }
-    const ReliabilityReport &training = result.trainingReport;
+    if (result.eyeToHandPoseReport.available) {
+        const EyeToHandPoseReport &report = result.eyeToHandPoseReport;
+        m_axXbReport->setText(QStringLiteral("AX=YB 一致性（Eye-To-Hand）\n旋转 RMSE：%1° | 平移 RMSE：%2 m\n平均：%3° / %4 m | 最大：%5° / %6 m\n异常样本：%7 | 状态：%8")
+                                  .arg(report.rotationRmseDeg, 0, 'f', 5)
+                                  .arg(report.translationRmseM, 0, 'f', 7)
+                                  .arg(report.rotationMeanDeg, 0, 'f', 5)
+                                  .arg(report.translationMeanM, 0, 'f', 7)
+                                  .arg(report.rotationMaxDeg, 0, 'f', 5)
+                                  .arg(report.translationMaxM, 0, 'f', 7)
+                                  .arg(report.outlierCount)
+                                  .arg(report.success ? QStringLiteral("可用") : QStringLiteral("失败")));
+        m_fixedTargetReport->setText(QStringLiteral("Eye-To-Hand 位姿一致性\n每组比较 T_base_target(robot) 与 T_base_target(camera)。\n输出：camera→base + target→gripper。"));
+        m_poseReportTable->setColumnCount(4);
+        m_poseReportTable->setHorizontalHeaderLabels({QStringLiteral("样本 ID"), QStringLiteral("旋转误差(°)"),
+                                                       QStringLiteral("平移误差(m)"), QStringLiteral("异常")});
+        m_poseReportTable->setRowCount(report.samples.size());
+        for (int row = 0; row < report.samples.size(); ++row) {
+            const EyeToHandPoseResidual &sample = report.samples.at(row);
+            m_poseReportTable->setItem(row, 0, new QTableWidgetItem(QString::number(sample.sampleId)));
+            m_poseReportTable->setItem(row, 1, new QTableWidgetItem(QString::number(sample.rotationErrorDeg, 'f', 5)));
+            m_poseReportTable->setItem(row, 2, new QTableWidgetItem(QString::number(sample.translationErrorM, 'f', 7)));
+            m_poseReportTable->setItem(row, 3, new QTableWidgetItem(sample.outlier ? QStringLiteral("异常") : QStringLiteral("正常")));
+        }
+        m_poseReportTable->resizeColumnsToContents();
+        m_reliability->setText(QStringLiteral("Eye-To-Hand PosePairs | AX=YB RMSE：%1° / %2 m\n非线性优化：%3 → %4 m，%5")
+                                   .arg(report.rotationRmseDeg, 0, 'f', 5)
+                                   .arg(report.translationRmseM, 0, 'f', 7)
+                                   .arg(result.optimizationReport.beforeTranslationRmseM, 0, 'f', 7)
+                                   .arg(result.optimizationReport.afterTranslationRmseM, 0, 'f', 7)
+                                   .arg(result.axXbReport.passed ? QStringLiteral("通过") : QStringLiteral("未通过")));
+        return;
+    }
+    if (result.eyeToHandPointReport.available) {
+        const EyeToHandPointReport &report = result.eyeToHandPointReport;
+        m_axXbReport->setText(QStringLiteral("Eye-To-Hand 点基一致性\nRMSE：%1 m | 平均：%2 m | 最大：%3 m\n异常样本：%4")
+                                  .arg(report.rmseM, 0, 'f', 7).arg(report.meanErrorM, 0, 'f', 7)
+                                  .arg(report.maxErrorM, 0, 'f', 7).arg(report.outlierCount));
+        m_fixedTargetReport->setText(QStringLiteral("输出：camera→base\nTCP 上特征点：[%1, %2, %3] m")
+                                         .arg(report.pointInGripper[0], 0, 'f', 6)
+                                         .arg(report.pointInGripper[1], 0, 'f', 6)
+                                         .arg(report.pointInGripper[2], 0, 'f', 6));
+        m_poseReportTable->setColumnCount(4);
+        m_poseReportTable->setHorizontalHeaderLabels({QStringLiteral("样本 ID"), QStringLiteral("预测 base XYZ"),
+                                                       QStringLiteral("残差(m)"), QStringLiteral("异常")});
+        m_poseReportTable->setRowCount(report.samples.size());
+        for (int row = 0; row < report.samples.size(); ++row) {
+            const FixedPointSample &sample = report.samples.at(row);
+            m_poseReportTable->setItem(row, 0, new QTableWidgetItem(QString::number(sample.sampleId)));
+            m_poseReportTable->setItem(row, 1, new QTableWidgetItem(
+                                                 QStringLiteral("[%1, %2, %3]").arg(sample.predictedBasePoint[0], 0, 'f', 5)
+                                                     .arg(sample.predictedBasePoint[1], 0, 'f', 5)
+                                                     .arg(sample.predictedBasePoint[2], 0, 'f', 5)));
+            m_poseReportTable->setItem(row, 2, new QTableWidgetItem(QString::number(sample.residualM, 'f', 7)));
+            m_poseReportTable->setItem(row, 3, new QTableWidgetItem(sample.outlier ? QStringLiteral("异常") : QStringLiteral("正常")));
+        }
+        m_poseReportTable->resizeColumnsToContents();
+        m_reliability->setText(QStringLiteral("Eye-To-Hand FixedPoint3D | camera→base\n固定点残差 RMSE：%1 m | 非线性优化：%2 → %3 m")
+                                   .arg(report.rmseM, 0, 'f', 7)
+                                   .arg(result.optimizationReport.beforeTranslationRmseM, 0, 'f', 7)
+                                   .arg(result.optimizationReport.afterTranslationRmseM, 0, 'f', 7));
+        return;
+    }
+    const AxXbReport &axXb = result.axXbReport;
+    m_axXbReport->setText(QStringLiteral("AX=XB 一致性\n旋转 RMSE：%1° | 平移 RMSE：%2 m\n平均：%3° / %4 m | 最大：%5° / %6 m\n异常样本：%7 | 状态：%8")
+                              .arg(axXb.rotationRmseDeg, 0, 'f', 5)
+                              .arg(axXb.translationRmseM, 0, 'f', 7)
+                              .arg(axXb.rotationMeanDeg, 0, 'f', 5)
+                              .arg(axXb.translationMeanM, 0, 'f', 7)
+                              .arg(axXb.rotationMaxDeg, 0, 'f', 5)
+                              .arg(axXb.translationMaxM, 0, 'f', 7)
+                              .arg(axXb.outlierCount)
+                              .arg(axXb.passed ? QStringLiteral("通过") : QStringLiteral("未通过")));
+    if (result.fixedTargetReport.available) {
+        m_fixedTargetReport->setText(QStringLiteral("Fixed Target 一致性\n旋转 RMSE：%1° | 平移 RMSE：%2 m\n平均：%3° / %4 m | 最大：%5° / %6 m\n异常样本：%7")
+                                         .arg(result.fixedTargetReport.rotationRmseDeg, 0, 'f', 5)
+                                         .arg(result.fixedTargetReport.translationRmseM, 0, 'f', 7)
+                                         .arg(result.fixedTargetReport.rotationMeanDeg, 0, 'f', 5)
+                                         .arg(result.fixedTargetReport.translationMeanM, 0, 'f', 7)
+                                         .arg(result.fixedTargetReport.rotationMaxDeg, 0, 'f', 5)
+                                         .arg(result.fixedTargetReport.translationMaxM, 0, 'f', 7)
+                                         .arg(result.fixedTargetReport.outlierCount));
+    } else if (result.fixedPointReport.available) {
+        m_fixedTargetReport->setText(QStringLiteral("FixedPoint3D 固定点一致性\nRMSE：%1 m | 平均：%2 m | 最大：%3 m\n异常样本：%4")
+                                         .arg(result.fixedPointReport.rmseM, 0, 'f', 7)
+                                         .arg(result.fixedPointReport.meanErrorM, 0, 'f', 7)
+                                         .arg(result.fixedPointReport.maxErrorM, 0, 'f', 7)
+                                         .arg(result.fixedPointReport.outlierCount));
+    } else {
+        m_fixedTargetReport->setText(QStringLiteral("Fixed Target 一致性：尚未计算。"));
+    }
     QString text = QStringLiteral("输入模式：%1\n训练：旋转 RMSE %2° | 平移 RMSE %3 m\n平均：%4° / %5 m\n最大：%6° / %7 m\n异常样本：%8\n状态：%9")
                        .arg(result.fixedPointReport.available ? QStringLiteral("FixedPoint3D")
                                                                : QStringLiteral("PosePairs"))
-                       .arg(training.rotationRmseDeg, 0, 'f', 5).arg(training.translationRmseM, 0, 'f', 7)
-                       .arg(training.rotationMeanDeg, 0, 'f', 5).arg(training.translationMeanM, 0, 'f', 7)
-                       .arg(training.rotationMaxDeg, 0, 'f', 5).arg(training.translationMaxM, 0, 'f', 7)
-                       .arg(training.outlierCount)
-                       .arg(training.passed ? QStringLiteral("通过") : QStringLiteral("未通过"));
+                       .arg(axXb.rotationRmseDeg, 0, 'f', 5).arg(axXb.translationRmseM, 0, 'f', 7)
+                       .arg(axXb.rotationMeanDeg, 0, 'f', 5).arg(axXb.translationMeanM, 0, 'f', 7)
+                       .arg(axXb.rotationMaxDeg, 0, 'f', 5).arg(axXb.translationMaxM, 0, 'f', 7)
+                       .arg(axXb.outlierCount)
+                       .arg(axXb.passed ? QStringLiteral("通过") : QStringLiteral("未通过"));
     if (result.fixedPointReport.available) {
         text += QStringLiteral("\n固定点：RMSE %1 m | 平均 %2 m | 最大 %3 m | 异常 %4")
                     .arg(result.fixedPointReport.rmseM, 0, 'f', 6)
@@ -231,10 +337,10 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
                     .arg(result.optimizationReport.converged ? QStringLiteral("已收敛") : QStringLiteral("达到停止条件"));
     }
     if (result.bootstrapReport.available) {
-        text += QStringLiteral("\nBootstrap：%1/%2 成功，置信度评分 %3/100，旋转不确定度 %4°，平移不确定度 %5 m")
+        text += QStringLiteral("\nBootstrap：%1/%2 成功，Bootstrap 成功率 %3%，旋转不确定度 %4°，平移不确定度 %5 m")
                     .arg(result.bootstrapReport.successfulResamples)
                     .arg(result.bootstrapReport.requestedResamples)
-                    .arg(result.bootstrapReport.confidenceScore, 0, 'f', 1)
+                    .arg(result.bootstrapReport.successRate * 100.0, 0, 'f', 1)
                     .arg(result.bootstrapReport.rotationNormStdDeg, 0, 'f', 5)
                     .arg(result.bootstrapReport.translationNormStdM, 0, 'f', 7);
     }
@@ -303,14 +409,14 @@ void CalibrationResultPage::showPipelineReport(const ReliabilityPipelineReport &
     }
     m_uncertainty->setText(
         QStringLiteral("最终矩阵：%1 | 流水线：%2 | 样本 %3 → %4（自动剔除 %5）\n"
-                       "Bootstrap：%6/%7 成功，置信度评分 %8/100\n"
+                       "Bootstrap：%6/%7 成功，Bootstrap 成功率 %8%\n"
                        "旋转标准差：[%9, %10, %11]°，95%% 区间：[%12, %13, %14]° ～ [%15, %16, %17]°\n"
                        "平移标准差：[%18, %19, %20] m，95%% 区间：[%21, %22, %23] m ～ [%24, %25, %26] m")
             .arg(methodName(report.finalMethod))
             .arg(report.passed ? QStringLiteral("通过") : QStringLiteral("有警告"))
             .arg(report.initialSampleCount).arg(report.finalSampleCount).arg(report.autoRemovedCount)
             .arg(bootstrap.successfulResamples).arg(bootstrap.requestedResamples)
-            .arg(bootstrap.confidenceScore, 0, 'f', 1)
+            .arg(bootstrap.successRate * 100.0, 0, 'f', 1)
             .arg(bootstrap.rotationStdDeg[0], 0, 'f', 5)
             .arg(bootstrap.rotationStdDeg[1], 0, 'f', 5)
             .arg(bootstrap.rotationStdDeg[2], 0, 'f', 5)
@@ -338,11 +444,25 @@ void CalibrationResultPage::showMatrix(const CalibrationResult &result)
         return;
     }
     QStringList lines;
-    lines << QStringLiteral("%1 | camera→gripper").arg(methodName(result.method));
-    for (const auto &row : result.cameraToGripper)
+    const bool eyeToHand = result.eyeToHandPoseReport.available || result.eyeToHandPointReport.available;
+    const Matrix4 &primary = eyeToHand ? result.cameraToBase : result.cameraToGripper;
+    lines << QStringLiteral("%1 | %2").arg(methodName(result.method), eyeToHand ? QStringLiteral("camera→base") : QStringLiteral("camera→gripper"));
+    for (const auto &row : primary)
         lines << QStringLiteral("[%1, %2, %3, %4]")
                       .arg(row[0], 0, 'f', 10).arg(row[1], 0, 'f', 10)
                       .arg(row[2], 0, 'f', 10).arg(row[3], 0, 'f', 10);
+    if (eyeToHand && result.eyeToHandPoseReport.available) {
+        lines << QStringLiteral("\ntarget→gripper");
+        for (const auto &row : result.targetToGripper)
+            lines << QStringLiteral("[%1, %2, %3, %4]")
+                          .arg(row[0], 0, 'f', 10).arg(row[1], 0, 'f', 10)
+                          .arg(row[2], 0, 'f', 10).arg(row[3], 0, 'f', 10);
+    } else if (eyeToHand) {
+        lines << QStringLiteral("\npoint in gripper: [%1, %2, %3] m")
+                      .arg(result.pointInGripper[0], 0, 'f', 10)
+                      .arg(result.pointInGripper[1], 0, 'f', 10)
+                      .arg(result.pointInGripper[2], 0, 'f', 10);
+    }
     m_matrix->setPlainText(lines.join('\n'));
 }
 
@@ -355,6 +475,8 @@ void CalibrationResultPage::clearResults()
 {
     m_model->setResults({});
     m_reliability->setText(QStringLiteral("尚未生成可靠性报告。"));
+    if (m_axXbReport) m_axXbReport->setText(QStringLiteral("AX=XB 一致性：尚未计算。"));
+    if (m_fixedTargetReport) m_fixedTargetReport->setText(QStringLiteral("Fixed Target 一致性：尚未计算。"));
     m_matrix->clear();
     if (m_pipelineTable) m_pipelineTable->setRowCount(0);
     if (m_uncertainty) m_uncertainty->setText(QStringLiteral("Bootstrap 置信度将在完整流水线执行后显示。"));

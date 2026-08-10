@@ -42,6 +42,7 @@ public:
                                const PoseInputSpec &spec);
     bool applyManualPointInputs(const QVector<PointSample> &samples,
                                 const PoseInputSpec &spec);
+    void recordBoardPdfReport(const BoardPdfReport &report);
 
     FixedTargetPoseReport computeFixedTargetPose(const CalibrationResult &result,
                                                  int referenceSampleId = -1);
@@ -55,6 +56,11 @@ public:
                                 double confidenceLevel = -1.0);
 
     // Input spec update
+    void synchronizeParameters(const PoseInputSpec &spec, const QString &robot, const QString &camera,
+                               const BoardSpec &board, const CameraIntrinsics &intrinsics,
+                               double rotationRmseDeg, double translationRmseM,
+                               CalibrationMode mode = CalibrationMode::EyeInHand,
+                               CalibrationInputMode inputMode = CalibrationInputMode::PosePairs);
     void updateInputSpec(const PoseInputSpec &spec, const QString &robot, const QString &camera);
     void updateImageProcessing(const BoardSpec &board, const CameraIntrinsics &intrinsics);
     void updateReliabilityThresholds(double rotationRmseDeg, double translationRmseM);
@@ -81,12 +87,17 @@ signals:
     void error(const QString &title, const QString &message);
 
 private:
-    void applyResiduals(const ReliabilityReport &report);
+    void applyResiduals(const AxXbReport &report);
     void emitDatasetChanged();
+    void invalidateComputedState(bool invalidateImagePoses, const QString &reason);
+    void clearImageBackedPoses();
+    quint64 beginCalculation();
+    bool isCurrentCalculation(quint64 revision, quint64 requestId) const;
     CalibrationResult recommendedResult() const;
     void emitCameraCalibrationChanged();
 
     CalibrationDataset m_dataset;
+    quint64 m_latestRequestId = 0;
 };
 
 } // namespace handeye

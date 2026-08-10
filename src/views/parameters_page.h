@@ -19,6 +19,8 @@ public:
     PoseInputSpec inputSpec() const;
     BoardSpec boardSpec() const;
     CameraIntrinsics cameraIntrinsics() const;
+    CalibrationMode mode() const;
+    CalibrationInputMode inputMode() const;
     CalibrationMethod currentMethod() const;
     double passRotationRmseDeg() const;
     double passTranslationRmseM() const;
@@ -27,6 +29,7 @@ public:
 
 signals:
     void parametersChanged();
+    void nextRequested();
 
 public slots:
     void setRobotCamera(const QString &robot, const QString &camera);
@@ -37,8 +40,10 @@ private slots:
 
 private:
     void emitParametersChanged();
+    void refreshMethodChoices();
 
     QComboBox *m_modeCombo = nullptr;
+    QComboBox *m_inputModeCombo = nullptr;
     QComboBox *m_methodCombo = nullptr;
     QComboBox *m_rotationFormatCombo = nullptr;
     QComboBox *m_angleUnitCombo = nullptr;
@@ -56,6 +61,7 @@ private:
     QLineEdit *m_markerCountXEdit = nullptr;
     QLineEdit *m_markerCountYEdit = nullptr;
     QLineEdit *m_markerSizeEdit = nullptr;
+    QLineEdit *m_markerSeparationEdit = nullptr;
     QLineEdit *m_cameraMatrixEdit = nullptr;
     QLineEdit *m_distortionEdit = nullptr;
     QLineEdit *m_passRotationEdit = nullptr;

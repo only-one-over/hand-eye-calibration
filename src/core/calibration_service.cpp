@@ -64,10 +64,10 @@ QVector<PairError> computePairErrors(const QVector<PoseSample> &samples, const c
     return errors;
 }
 
-ReliabilityReport evaluate(const CalibrationDataset &dataset, const QVector<PoseSample> &samples,
-                           const cv::Matx44d &cameraToGripper)
+AxXbReport evaluate(const CalibrationDataset &dataset, const QVector<PoseSample> &samples,
+                    const cv::Matx44d &cameraToGripper)
 {
-    ReliabilityReport report;
+    AxXbReport report;
     report.available = true;
     report.sampleCount = samples.size();
     const ValidationReport validation = validateDataset(dataset, &samples);
@@ -141,8 +141,8 @@ ReliabilityReport evaluate(const CalibrationDataset &dataset, const QVector<Pose
 
 double recommendationScore(const CalibrationDataset &dataset, const CalibrationResult &result)
 {
-    const ReliabilityReport &report = result.validationReport.available ? result.validationReport
-                                                                          : result.trainingReport;
+    const AxXbReport &report = result.validationReport.available ? result.validationReport
+                                                                  : result.axXbReport;
     return std::pow(report.rotationRmseDeg / std::max(dataset.passRotationRmseDeg, 1e-9), 2.0)
            + std::pow(report.translationRmseM / std::max(dataset.passTranslationRmseM, 1e-12), 2.0);
 }
@@ -153,14 +153,15 @@ CalibrationResult CalibrationService::calibrate(const CalibrationDataset &datase
 {
     CalibrationResult result;
     result.method = method;
+    result.seedMethod = method;
     QElapsedTimer timer;
     timer.start();
 
     const ValidationReport validation = validateDataset(dataset);
     if (!validation.valid) {
         result.message = validation.errors.join(QStringLiteral(" "));
-        result.trainingReport.errors = validation.errors;
-        result.trainingReport.warnings = validation.warnings;
+        result.axXbReport.errors = validation.errors;
+        result.axXbReport.warnings = validation.warnings;
         result.elapsedMs = timer.elapsed();
         return result;
     }
@@ -195,15 +196,16 @@ CalibrationResult CalibrationService::calibrate(const CalibrationDataset &datase
         const cv::Matx44d cameraToGripper = matrix::fromRodrigues(matrix::toRodrigues(rotation),
                                                                    {translation[0], translation[1], translation[2]});
         result.cameraToGripper = matrix::toArray(cameraToGripper);
-        result.trainingReport = evaluate(dataset, dataset.samples, cameraToGripper);
+        result.axXbReport = evaluate(dataset, dataset.samples, cameraToGripper);
+        result.trainingReport = result.axXbReport;
         if (dataset.validationSamples.size() >= 3)
             result.validationReport = evaluate(dataset, dataset.validationSamples, cameraToGripper);
-        result.rotationErrorDeg = result.trainingReport.rotationRmseDeg;
-        result.translationError = result.trainingReport.translationRmseM;
+        result.rotationErrorDeg = result.axXbReport.rotationRmseDeg;
+        result.translationError = result.axXbReport.translationRmseM;
         result.fixedTargetReport = PoseQualityService::computeFixedTargetPose(dataset, result.cameraToGripper);
         result.qualityReport = PoseQualityService::evaluatePoseQuality(dataset);
         result.success = true;
-        result.message = result.trainingReport.passed ? QStringLiteral("计算成功，训练数据通过")
+        result.message = result.axXbReport.passed ? QStringLiteral("计算成功，训练数据通过")
                                                        : QStringLiteral("计算成功，但可靠性未通过");
     } catch (const cv::Exception &error) {
         result.message = QStringLiteral("OpenCV 错误：%1").arg(QString::fromStdString(error.what()));
@@ -226,7 +228,7 @@ QVector<CalibrationResult> CalibrationService::calibrateAll(const CalibrationDat
     double bestScore = std::numeric_limits<double>::max();
     for (int index = 0; index < results.size(); ++index) {
         const CalibrationResult &result = results.at(index);
-        const bool passing = result.success && result.trainingReport.passed
+        const bool passing = result.success && result.axXbReport.passed
                              && (!result.validationReport.available || result.validationReport.passed);
         if (passing && !anyPassing) {
             anyPassing = true;

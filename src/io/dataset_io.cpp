@@ -10,6 +10,8 @@
 #include <QLocale>
 #include <QTextStream>
 
+#include <algorithm>
+
 namespace handeye {
 
 namespace {
@@ -126,6 +128,42 @@ QJsonObject pointSampleToJson(const PointSample &sample)
             {QStringLiteral("outlier"), sample.outlier}};
 }
 
+QJsonObject boardPdfReportToJson(const BoardPdfReport &report)
+{
+    QJsonArray warnings;
+    for (const QString &warning : report.warnings) warnings.append(warning);
+    return {{QStringLiteral("success"), report.success},
+            {QStringLiteral("reused"), report.reused},
+            {QStringLiteral("output_path"), report.outputPath},
+            {QStringLiteral("pattern"), report.pattern},
+            {QStringLiteral("output_mode"), report.outputMode},
+            {QStringLiteral("page_count"), report.pageCount},
+            {QStringLiteral("width_mm"), report.widthMm},
+            {QStringLiteral("height_mm"), report.heightMm},
+            {QStringLiteral("warnings"), warnings},
+            {QStringLiteral("error"), report.error},
+            {QStringLiteral("generated_at"), report.generatedAt.toString(Qt::ISODate)}};
+}
+
+BoardPdfReport boardPdfReportFromJson(const QJsonObject &object)
+{
+    BoardPdfReport report;
+    report.success = object.value(QStringLiteral("success")).toBool(false);
+    report.reused = object.value(QStringLiteral("reused")).toBool(false);
+    report.outputPath = object.value(QStringLiteral("output_path")).toString();
+    report.pattern = object.value(QStringLiteral("pattern")).toString();
+    report.outputMode = object.value(QStringLiteral("output_mode")).toString();
+    report.pageCount = object.value(QStringLiteral("page_count")).toInt();
+    report.widthMm = object.value(QStringLiteral("width_mm")).toDouble();
+    report.heightMm = object.value(QStringLiteral("height_mm")).toDouble();
+    report.error = object.value(QStringLiteral("error")).toString();
+    report.generatedAt = QDateTime::fromString(object.value(QStringLiteral("generated_at")).toString(),
+                                                Qt::ISODate);
+    for (const QJsonValue &warning : object.value(QStringLiteral("warnings")).toArray())
+        report.warnings.append(warning.toString());
+    return report;
+}
+
 PointSample pointSampleFromJson(const QJsonObject &object)
 {
     PointSample sample;
@@ -148,6 +186,27 @@ CalibrationMode modeFromString(const QString &value)
 
 QString formatToString(RotationFormat format) { return rotationFormatName(format); }
 QString adapterToString(PoseAdapterKind adapter) { return adapterName(adapter); }
+
+QString conventionToString(PoseConvention convention)
+{
+    switch (convention) {
+    case PoseConvention::EulerXYZIntrinsic: return QStringLiteral("EulerXYZIntrinsic");
+    case PoseConvention::RpyZyx: return QStringLiteral("RPY_ZYX");
+    case PoseConvention::KukaAbcZyx: return QStringLiteral("KUKA_ABC_ZYX");
+    case PoseConvention::FanucWprXyz: return QStringLiteral("FANUC_WPR_XYZ");
+    case PoseConvention::Generic: return QStringLiteral("Generic");
+    }
+    return QStringLiteral("Generic");
+}
+
+PoseConvention conventionFromString(const QString &value)
+{
+    if (value == QStringLiteral("EulerXYZIntrinsic")) return PoseConvention::EulerXYZIntrinsic;
+    if (value == QStringLiteral("RPY_ZYX")) return PoseConvention::RpyZyx;
+    if (value == QStringLiteral("KUKA_ABC_ZYX")) return PoseConvention::KukaAbcZyx;
+    if (value == QStringLiteral("FANUC_WPR_XYZ")) return PoseConvention::FanucWprXyz;
+    return PoseConvention::Generic;
+}
 
 BoardPattern boardPatternFromString(const QString &value)
 {
@@ -240,7 +299,7 @@ PoseSample sampleFromJson(const QJsonObject &object)
     return sample;
 }
 
-QJsonObject reportToJson(const ReliabilityReport &report)
+QJsonObject reportToJson(const AxXbReport &report)
 {
     QJsonArray residuals;
     for (const SampleResidual &residual : report.sampleResiduals) {
@@ -265,9 +324,9 @@ QJsonObject reportToJson(const ReliabilityReport &report)
             {QStringLiteral("sample_residuals"), residuals}};
 }
 
-ReliabilityReport reportFromJson(const QJsonObject &object)
+AxXbReport reportFromJson(const QJsonObject &object)
 {
-    ReliabilityReport report;
+    AxXbReport report;
     report.available = object.value(QStringLiteral("available")).toBool();
     report.valid = object.value(QStringLiteral("valid")).toBool();
     report.passed = object.value(QStringLiteral("passed")).toBool();
@@ -406,7 +465,15 @@ BootstrapReport bootstrapReportFromJson(const QJsonObject &object)
     report.translationUpperM = vectorFromJson(object.value(QStringLiteral("translation_upper_m")));
     report.rotationNormStdDeg = object.value(QStringLiteral("rotation_norm_std_deg")).toDouble();
     report.translationNormStdM = object.value(QStringLiteral("translation_norm_std_m")).toDouble();
-    report.confidenceScore = object.value(QStringLiteral("confidence_score")).toDouble();
+    if (object.contains(QStringLiteral("success_rate")))
+        report.successRate = std::clamp(object.value(QStringLiteral("success_rate")).toDouble(), 0.0, 1.0);
+    else {
+        const double legacyScore = object.value(QStringLiteral("confidence_score")).toDouble();
+        report.successRate = std::clamp(legacyScore > 1.0 ? legacyScore / 100.0 : legacyScore, 0.0, 1.0);
+    }
+    report.rawSuccessfulResamples = object.value(QStringLiteral("raw_successful_resamples")).toInt();
+    report.nonlinearSuccessfulResamples = object.value(QStringLiteral("nonlinear_successful_resamples")).toInt();
+    report.invalidResamples = object.value(QStringLiteral("invalid_resamples")).toInt();
     for (const QJsonValue &value : object.value(QStringLiteral("warnings")).toArray())
         report.warnings.append(value.toString());
     report.message = object.value(QStringLiteral("message")).toString();
@@ -477,6 +544,98 @@ QJsonObject fixedPointReportToJson(const FixedPointReport &report)
             {QStringLiteral("samples"), samples}};
 }
 
+QJsonObject eyeToHandPoseReportToJson(const EyeToHandPoseReport &report)
+{
+    QJsonArray samples;
+    for (const EyeToHandPoseResidual &sample : report.samples)
+        samples.append(QJsonObject{{QStringLiteral("sample_id"), sample.sampleId},
+                                   {QStringLiteral("rotation_error_deg"), sample.rotationErrorDeg},
+                                   {QStringLiteral("translation_error_m"), sample.translationErrorM},
+                                   {QStringLiteral("outlier"), sample.outlier}});
+    return {{QStringLiteral("available"), report.available}, {QStringLiteral("success"), report.success},
+            {QStringLiteral("camera_to_base"), matrixToJson(report.cameraToBase)},
+            {QStringLiteral("target_to_gripper"), matrixToJson(report.targetToGripper)},
+            {QStringLiteral("rotation_rmse_deg"), report.rotationRmseDeg},
+            {QStringLiteral("translation_rmse_m"), report.translationRmseM},
+            {QStringLiteral("rotation_mean_deg"), report.rotationMeanDeg},
+            {QStringLiteral("translation_mean_m"), report.translationMeanM},
+            {QStringLiteral("rotation_max_deg"), report.rotationMaxDeg},
+            {QStringLiteral("translation_max_m"), report.translationMaxM},
+            {QStringLiteral("outlier_count"), report.outlierCount},
+            {QStringLiteral("errors"), QJsonArray::fromStringList(report.errors)},
+            {QStringLiteral("warnings"), QJsonArray::fromStringList(report.warnings)},
+            {QStringLiteral("samples"), samples}};
+}
+
+EyeToHandPoseReport eyeToHandPoseReportFromJson(const QJsonObject &object)
+{
+    EyeToHandPoseReport report;
+    report.available = object.value(QStringLiteral("available")).toBool();
+    report.success = object.value(QStringLiteral("success")).toBool();
+    report.cameraToBase = matrixFromJson(object.value(QStringLiteral("camera_to_base")));
+    report.targetToGripper = matrixFromJson(object.value(QStringLiteral("target_to_gripper")));
+    report.rotationRmseDeg = object.value(QStringLiteral("rotation_rmse_deg")).toDouble();
+    report.translationRmseM = object.value(QStringLiteral("translation_rmse_m")).toDouble();
+    report.rotationMeanDeg = object.value(QStringLiteral("rotation_mean_deg")).toDouble();
+    report.translationMeanM = object.value(QStringLiteral("translation_mean_m")).toDouble();
+    report.rotationMaxDeg = object.value(QStringLiteral("rotation_max_deg")).toDouble();
+    report.translationMaxM = object.value(QStringLiteral("translation_max_m")).toDouble();
+    report.outlierCount = object.value(QStringLiteral("outlier_count")).toInt();
+    for (const QJsonValue &value : object.value(QStringLiteral("errors")).toArray()) report.errors.append(value.toString());
+    for (const QJsonValue &value : object.value(QStringLiteral("warnings")).toArray()) report.warnings.append(value.toString());
+    for (const QJsonValue &value : object.value(QStringLiteral("samples")).toArray()) {
+        const QJsonObject item = value.toObject();
+        report.samples.append({item.value(QStringLiteral("sample_id")).toInt(),
+                               item.value(QStringLiteral("rotation_error_deg")).toDouble(),
+                               item.value(QStringLiteral("translation_error_m")).toDouble(),
+                               item.value(QStringLiteral("outlier")).toBool()});
+    }
+    return report;
+}
+
+QJsonObject eyeToHandPointReportToJson(const EyeToHandPointReport &report)
+{
+    QJsonArray samples;
+    for (const FixedPointSample &sample : report.samples)
+        samples.append(QJsonObject{{QStringLiteral("sample_id"), sample.sampleId},
+                                   {QStringLiteral("predicted_base_point_m"), vectorToJson(sample.predictedBasePoint)},
+                                   {QStringLiteral("residual_m"), sample.residualM},
+                                   {QStringLiteral("outlier"), sample.outlier}});
+    return {{QStringLiteral("available"), report.available}, {QStringLiteral("success"), report.success},
+            {QStringLiteral("camera_to_base"), matrixToJson(report.cameraToBase)},
+            {QStringLiteral("point_in_gripper_m"), vectorToJson(report.pointInGripper)},
+            {QStringLiteral("rmse_m"), report.rmseM}, {QStringLiteral("mean_error_m"), report.meanErrorM},
+            {QStringLiteral("max_error_m"), report.maxErrorM}, {QStringLiteral("outlier_count"), report.outlierCount},
+            {QStringLiteral("errors"), QJsonArray::fromStringList(report.errors)},
+            {QStringLiteral("warnings"), QJsonArray::fromStringList(report.warnings)},
+            {QStringLiteral("samples"), samples}};
+}
+
+EyeToHandPointReport eyeToHandPointReportFromJson(const QJsonObject &object)
+{
+    EyeToHandPointReport report;
+    report.available = object.value(QStringLiteral("available")).toBool();
+    report.success = object.value(QStringLiteral("success")).toBool();
+    report.cameraToBase = matrixFromJson(object.value(QStringLiteral("camera_to_base")));
+    report.pointInGripper = vectorFromJson(object.value(QStringLiteral("point_in_gripper_m")));
+    report.rmseM = object.value(QStringLiteral("rmse_m")).toDouble();
+    report.meanErrorM = object.value(QStringLiteral("mean_error_m")).toDouble();
+    report.maxErrorM = object.value(QStringLiteral("max_error_m")).toDouble();
+    report.outlierCount = object.value(QStringLiteral("outlier_count")).toInt();
+    for (const QJsonValue &value : object.value(QStringLiteral("errors")).toArray()) report.errors.append(value.toString());
+    for (const QJsonValue &value : object.value(QStringLiteral("warnings")).toArray()) report.warnings.append(value.toString());
+    for (const QJsonValue &value : object.value(QStringLiteral("samples")).toArray()) {
+        const QJsonObject item = value.toObject();
+        FixedPointSample sample;
+        sample.sampleId = item.value(QStringLiteral("sample_id")).toInt();
+        sample.predictedBasePoint = vectorFromJson(item.value(QStringLiteral("predicted_base_point_m")));
+        sample.residualM = item.value(QStringLiteral("residual_m")).toDouble();
+        sample.outlier = item.value(QStringLiteral("outlier")).toBool();
+        report.samples.append(sample);
+    }
+    return report;
+}
+
 QJsonObject qualityReportToJson(const PoseQualityReport &report)
 {
     return {{QStringLiteral("available"), report.available}, {QStringLiteral("calculable"), report.calculable},
@@ -502,6 +661,9 @@ QJsonObject optimizationReportToJson(const NonlinearOptimizationReport &report)
             {QStringLiteral("before_translation_rmse_m"), report.beforeTranslationRmseM},
             {QStringLiteral("after_rotation_rmse_deg"), report.afterRotationRmseDeg},
             {QStringLiteral("after_translation_rmse_m"), report.afterTranslationRmseM},
+            {QStringLiteral("normalized_huber_loss_before"), report.normalizedHuberLossBefore},
+            {QStringLiteral("normalized_huber_loss_after"), report.normalizedHuberLossAfter},
+            {QStringLiteral("normalized_huber_delta"), report.normalizedHuberDelta},
             {QStringLiteral("message"), report.message}};
 }
 
@@ -522,6 +684,9 @@ QJsonObject bootstrapReportToJson(const BootstrapReport &report)
     return {{QStringLiteral("available"), report.available}, {QStringLiteral("success"), report.success},
             {QStringLiteral("requested_resamples"), report.requestedResamples},
             {QStringLiteral("successful_resamples"), report.successfulResamples},
+            {QStringLiteral("raw_successful_resamples"), report.rawSuccessfulResamples},
+            {QStringLiteral("nonlinear_successful_resamples"), report.nonlinearSuccessfulResamples},
+            {QStringLiteral("invalid_resamples"), report.invalidResamples},
             {QStringLiteral("confidence_level"), report.confidenceLevel},
             {QStringLiteral("rotation_std_deg"), vectorToJson(report.rotationStdDeg)},
             {QStringLiteral("translation_std_m"), vectorToJson(report.translationStdM)},
@@ -531,7 +696,7 @@ QJsonObject bootstrapReportToJson(const BootstrapReport &report)
             {QStringLiteral("translation_upper_m"), vectorToJson(report.translationUpperM)},
             {QStringLiteral("rotation_norm_std_deg"), report.rotationNormStdDeg},
             {QStringLiteral("translation_norm_std_m"), report.translationNormStdM},
-            {QStringLiteral("confidence_score"), report.confidenceScore},
+            {QStringLiteral("success_rate"), report.successRate},
             {QStringLiteral("warnings"), QJsonArray::fromStringList(report.warnings)},
             {QStringLiteral("message"), report.message}};
 }
@@ -546,17 +711,23 @@ QJsonObject pipelineStageToJson(const PipelineStageReport &stage)
 QJsonObject resultToJson(const CalibrationResult &result)
 {
     return {{QStringLiteral("method"), methodName(result.method)},
+            {QStringLiteral("seed_method"), methodName(result.seedMethod)},
             {QStringLiteral("success"), result.success},
             {QStringLiteral("recommended"), result.recommended},
             {QStringLiteral("camera_to_gripper"), matrixToJson(result.cameraToGripper)},
+            {QStringLiteral("camera_to_base"), matrixToJson(result.cameraToBase)},
+            {QStringLiteral("target_to_gripper"), matrixToJson(result.targetToGripper)},
+            {QStringLiteral("point_in_gripper_m"), vectorToJson(result.pointInGripper)},
             {QStringLiteral("rotation_rmse_deg"), result.rotationErrorDeg},
             {QStringLiteral("translation_rmse_m"), result.translationError},
             {QStringLiteral("elapsed_ms"), result.elapsedMs},
             {QStringLiteral("message"), result.message},
-            {QStringLiteral("training_report"), reportToJson(result.trainingReport)},
+            {QStringLiteral("ax_xb_report"), reportToJson(result.axXbReport)},
             {QStringLiteral("validation_report"), reportToJson(result.validationReport)},
             {QStringLiteral("fixed_target_report"), fixedTargetReportToJson(result.fixedTargetReport)},
             {QStringLiteral("fixed_point_report"), fixedPointReportToJson(result.fixedPointReport)},
+            {QStringLiteral("eye_to_hand_pose_report"), eyeToHandPoseReportToJson(result.eyeToHandPoseReport)},
+            {QStringLiteral("eye_to_hand_point_report"), eyeToHandPointReportToJson(result.eyeToHandPointReport)},
             {QStringLiteral("quality_report"), qualityReportToJson(result.qualityReport)},
             {QStringLiteral("optimization_report"), optimizationReportToJson(result.optimizationReport)},
             {QStringLiteral("bootstrap_report"), bootstrapReportToJson(result.bootstrapReport)}};
@@ -570,6 +741,8 @@ CalibrationMethod methodFromString(const QString &value)
     if (value == QStringLiteral("Daniilidis")) return CalibrationMethod::Daniilidis;
     if (value.startsWith(QStringLiteral("FixedPoint3D"))) return CalibrationMethod::PointBased;
     if (value.startsWith(QStringLiteral("非线性"))) return CalibrationMethod::Nonlinear;
+    if (value == QStringLiteral("Robot-World Shah")) return CalibrationMethod::RobotWorldShah;
+    if (value == QStringLiteral("Robot-World Li")) return CalibrationMethod::RobotWorldLi;
     return CalibrationMethod::Tsai;
 }
 
@@ -577,17 +750,27 @@ CalibrationResult resultFromJson(const QJsonObject &object)
 {
     CalibrationResult result;
     result.method = methodFromString(object.value(QStringLiteral("method")).toString());
+    result.seedMethod = methodFromString(object.value(QStringLiteral("seed_method")).toString());
     result.success = object.value(QStringLiteral("success")).toBool();
     result.recommended = object.value(QStringLiteral("recommended")).toBool();
     result.cameraToGripper = matrixFromJson(object.value(QStringLiteral("camera_to_gripper")));
+    result.cameraToBase = matrixFromJson(object.value(QStringLiteral("camera_to_base")));
+    result.targetToGripper = matrixFromJson(object.value(QStringLiteral("target_to_gripper")));
+    result.pointInGripper = vectorFromJson(object.value(QStringLiteral("point_in_gripper_m")));
     result.rotationErrorDeg = object.value(QStringLiteral("rotation_rmse_deg")).toDouble();
     result.translationError = object.value(QStringLiteral("translation_rmse_m")).toDouble();
     result.elapsedMs = object.value(QStringLiteral("elapsed_ms")).toInteger();
     result.message = object.value(QStringLiteral("message")).toString();
-    result.trainingReport = reportFromJson(object.value(QStringLiteral("training_report")).toObject());
+    const QJsonObject axXbObject = object.contains(QStringLiteral("ax_xb_report"))
+                                       ? object.value(QStringLiteral("ax_xb_report")).toObject()
+                                       : object.value(QStringLiteral("training_report")).toObject();
+    result.axXbReport = reportFromJson(axXbObject);
+    result.trainingReport = result.axXbReport;
     result.validationReport = reportFromJson(object.value(QStringLiteral("validation_report")).toObject());
     result.fixedTargetReport = fixedTargetReportFromJson(object.value(QStringLiteral("fixed_target_report")).toObject());
     result.fixedPointReport = fixedPointReportFromJson(object.value(QStringLiteral("fixed_point_report")).toObject());
+    result.eyeToHandPoseReport = eyeToHandPoseReportFromJson(object.value(QStringLiteral("eye_to_hand_pose_report")).toObject());
+    result.eyeToHandPointReport = eyeToHandPointReportFromJson(object.value(QStringLiteral("eye_to_hand_point_report")).toObject());
     result.qualityReport = qualityReportFromJson(object.value(QStringLiteral("quality_report")).toObject());
     result.optimizationReport = optimizationReportFromJson(object.value(QStringLiteral("optimization_report")).toObject());
     result.bootstrapReport = bootstrapReportFromJson(object.value(QStringLiteral("bootstrap_report")).toObject());
@@ -600,12 +783,26 @@ QJsonObject reliabilityPipelineReportToJson(const ReliabilityPipelineReport &rep
     for (const PipelineStageReport &stage : report.stages) stages.append(pipelineStageToJson(stage));
     QJsonArray removedIds;
     for (int id : report.removedSampleIds) removedIds.append(id);
+    QJsonArray candidateIds;
+    for (int id : report.candidateSampleIds) candidateIds.append(id);
+    QJsonArray retainedIds;
+    for (int id : report.retainedOutlierIds) retainedIds.append(id);
+    QJsonArray validation;
+    for (const OutlierValidationStep &step : report.outlierValidation)
+        validation.append(QJsonObject{{QStringLiteral("sample_id"), step.sampleId},
+                                      {QStringLiteral("before_loss"), step.beforeLoss},
+                                      {QStringLiteral("after_loss"), step.afterLoss},
+                                      {QStringLiteral("accepted"), step.accepted},
+                                      {QStringLiteral("message"), step.message}});
     return {{QStringLiteral("available"), report.available}, {QStringLiteral("success"), report.success},
             {QStringLiteral("passed"), report.passed},
             {QStringLiteral("initial_sample_count"), report.initialSampleCount},
             {QStringLiteral("final_sample_count"), report.finalSampleCount},
             {QStringLiteral("auto_removed_count"), report.autoRemovedCount},
-            {QStringLiteral("removed_sample_ids"), removedIds}, {QStringLiteral("stages"), stages},
+            {QStringLiteral("removed_sample_ids"), removedIds},
+            {QStringLiteral("candidate_sample_ids"), candidateIds},
+            {QStringLiteral("retained_outlier_ids"), retainedIds},
+            {QStringLiteral("outlier_validation"), validation}, {QStringLiteral("stages"), stages},
             {QStringLiteral("pnp_report"), pnpQualityReportToJson(report.pnpReport)},
             {QStringLiteral("ax_xb_report"), reportToJson(report.axXbReport)},
             {QStringLiteral("fixed_target_report"), fixedTargetReportToJson(report.fixedTargetReport)},
@@ -615,6 +812,11 @@ QJsonObject reliabilityPipelineReportToJson(const ReliabilityPipelineReport &rep
             {QStringLiteral("bootstrap_report"), bootstrapReportToJson(report.bootstrapReport)},
             {QStringLiteral("final_method"), methodName(report.finalMethod)},
             {QStringLiteral("final_camera_to_gripper"), matrixToJson(report.finalCameraToGripper)},
+            {QStringLiteral("final_camera_to_base"), matrixToJson(report.finalCameraToBase)},
+            {QStringLiteral("final_target_to_gripper"), matrixToJson(report.finalTargetToGripper)},
+            {QStringLiteral("final_point_in_gripper_m"), vectorToJson(report.finalPointInGripper)},
+            {QStringLiteral("eye_to_hand_pose_report"), eyeToHandPoseReportToJson(report.eyeToHandPoseReport)},
+            {QStringLiteral("eye_to_hand_point_report"), eyeToHandPointReportToJson(report.eyeToHandPointReport)},
             {QStringLiteral("errors"), QJsonArray::fromStringList(report.errors)},
             {QStringLiteral("warnings"), QJsonArray::fromStringList(report.warnings)},
             {QStringLiteral("message"), report.message},
@@ -633,6 +835,18 @@ ReliabilityPipelineReport reliabilityPipelineReportFromJson(const QJsonObject &o
     report.autoRemovedCount = object.value(QStringLiteral("auto_removed_count")).toInt();
     for (const QJsonValue &value : object.value(QStringLiteral("removed_sample_ids")).toArray())
         report.removedSampleIds.append(value.toInt());
+    for (const QJsonValue &value : object.value(QStringLiteral("candidate_sample_ids")).toArray())
+        report.candidateSampleIds.append(value.toInt());
+    for (const QJsonValue &value : object.value(QStringLiteral("retained_outlier_ids")).toArray())
+        report.retainedOutlierIds.append(value.toInt());
+    for (const QJsonValue &value : object.value(QStringLiteral("outlier_validation")).toArray()) {
+        const QJsonObject item = value.toObject();
+        report.outlierValidation.append({item.value(QStringLiteral("sample_id")).toInt(),
+                                         item.value(QStringLiteral("before_loss")).toDouble(),
+                                         item.value(QStringLiteral("after_loss")).toDouble(),
+                                         item.value(QStringLiteral("accepted")).toBool(),
+                                         item.value(QStringLiteral("message")).toString()});
+    }
     for (const QJsonValue &value : object.value(QStringLiteral("stages")).toArray()) {
         const QJsonObject stage = value.toObject();
         report.stages.append({stage.value(QStringLiteral("name")).toString(),
@@ -648,6 +862,11 @@ ReliabilityPipelineReport reliabilityPipelineReportFromJson(const QJsonObject &o
     report.bootstrapReport = bootstrapReportFromJson(object.value(QStringLiteral("bootstrap_report")).toObject());
     report.finalMethod = methodFromString(object.value(QStringLiteral("final_method")).toString());
     report.finalCameraToGripper = matrixFromJson(object.value(QStringLiteral("final_camera_to_gripper")));
+    report.finalCameraToBase = matrixFromJson(object.value(QStringLiteral("final_camera_to_base")));
+    report.finalTargetToGripper = matrixFromJson(object.value(QStringLiteral("final_target_to_gripper")));
+    report.finalPointInGripper = vectorFromJson(object.value(QStringLiteral("final_point_in_gripper_m")));
+    report.eyeToHandPoseReport = eyeToHandPoseReportFromJson(object.value(QStringLiteral("eye_to_hand_pose_report")).toObject());
+    report.eyeToHandPointReport = eyeToHandPointReportFromJson(object.value(QStringLiteral("eye_to_hand_point_report")).toObject());
     for (const QJsonValue &value : object.value(QStringLiteral("errors")).toArray()) report.errors.append(value.toString());
     for (const QJsonValue &value : object.value(QStringLiteral("warnings")).toArray()) report.warnings.append(value.toString());
     report.message = object.value(QStringLiteral("message")).toString();
@@ -788,6 +1007,15 @@ QString vectorText(const Vector3 &value)
         .arg(value[1], 0, 'g', 15).arg(value[2], 0, 'g', 15);
 }
 
+Vector4 exportRotation(const Vector3 &rotation, const PoseInputSpec &spec)
+{
+    if (spec.adapter == PoseAdapterKind::Kuka)
+        return pose::rotationToConvention(rotation, PoseConvention::KukaAbcZyx, spec.angleUnit);
+    if (spec.adapter == PoseAdapterKind::Fanuc)
+        return pose::rotationToConvention(rotation, PoseConvention::FanucWprXyz, spec.angleUnit);
+    return pose::rotationToFormat(rotation, spec.rotationFormat, spec.angleUnit);
+}
+
 QString matrixText(const Matrix4 &matrix)
 {
     QStringList lines;
@@ -804,15 +1032,25 @@ IoResult writeCsv(const QString &filePath, const CalibrationDataset &dataset)
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return {false, file.errorString()};
     QTextStream stream(&file);
-    stream << "# handeye_schema=2; rotation=Rodrigues; angle=rad; length=m; "
+    const bool quaternion = dataset.inputSpec.rotationFormat == RotationFormat::QuaternionWXYZ;
+    stream << "# handeye_schema=2; rotation=" << rotationFormatName(dataset.inputSpec.rotationFormat)
+           << "; angle=" << angleUnitName(dataset.inputSpec.angleUnit)
+           << "; length=" << lengthUnitName(dataset.inputSpec.lengthUnit) << "; "
               "gripper=gripper_to_base; target=target_to_camera\n";
-    stream << "id,label,gripper_rx,gripper_ry,gripper_rz,gripper_tx,gripper_ty,gripper_tz,"
-              "target_rx,target_ry,target_rz,target_tx,target_ty,target_tz\n";
+    if (quaternion) {
+        stream << "id,label,gripper_qw,gripper_qx,gripper_qy,gripper_qz,gripper_tx,gripper_ty,gripper_tz,"
+                  "target_qw,target_qx,target_qy,target_qz,target_tx,target_ty,target_tz\n";
+    } else {
+        stream << "id,label,gripper_rx,gripper_ry,gripper_rz,gripper_tx,gripper_ty,gripper_tz,"
+                  "target_rx,target_ry,target_rz,target_tx,target_ty,target_tz\n";
+    }
     for (const PoseSample &sample : dataset.samples) {
+        const Vector4 gripperRotation = exportRotation(sample.gripperRotation, dataset.inputSpec);
+        const Vector4 targetRotation = exportRotation(sample.targetRotation, dataset.inputSpec);
         stream << sample.id << ',' << sample.label << ',';
-        for (double value : sample.gripperRotation) stream << value << ',';
+        for (int index = 0; index < (quaternion ? 4 : 3); ++index) stream << gripperRotation[index] << ',';
         for (double value : sample.gripperTranslation) stream << value << ',';
-        for (double value : sample.targetRotation) stream << value << ',';
+        for (int index = 0; index < (quaternion ? 4 : 3); ++index) stream << targetRotation[index] << ',';
         stream << sample.targetTranslation[0] << ',' << sample.targetTranslation[1] << ','
                << sample.targetTranslation[2] << '\n';
     }
@@ -837,9 +1075,9 @@ IoResult readCsv(const QString &filePath, CalibrationDataset *dataset, const Pos
         const QString line = stream.readLine().trimmed();
         if (line.isEmpty()) continue;
         const QStringList fields = line.split(',');
-        if (fields.size() < expectedFields)
-            return {false, QStringLiteral("第 %1 行列数不足，应为至少 %2 列。")
-                        .arg(lineNumber).arg(expectedFields)};
+        if (fields.size() != expectedFields)
+            return {false, QStringLiteral("第 %1 行列数错误，应为 %2 列，实际为 %3 列。")
+                        .arg(lineNumber).arg(expectedFields).arg(fields.size())};
         bool ok = false;
         PoseSample sample;
         sample.id = fields.at(0).toInt(&ok);
@@ -900,9 +1138,12 @@ IoResult writeJson(const QString &filePath, const CalibrationDataset &dataset)
         {QStringLiteral("angle_unit"), angleUnitName(dataset.inputSpec.angleUnit)},
         {QStringLiteral("length_unit"), lengthUnitName(dataset.inputSpec.lengthUnit)},
         {QStringLiteral("pose_adapter"), adapterToString(dataset.inputSpec.adapter)},
+        {QStringLiteral("pose_convention"), conventionToString(dataset.inputSpec.convention)},
         {QStringLiteral("direction_gripper"), directionName(PoseDirection::GripperToBase)},
         {QStringLiteral("direction_target"), directionName(PoseDirection::TargetToCamera)},
-        {QStringLiteral("direction_result"), directionName(PoseDirection::CameraToGripper)},
+        {QStringLiteral("direction_result"), dataset.mode == CalibrationMode::EyeToHand
+                                                 ? QStringLiteral("camera → base")
+                                                 : directionName(PoseDirection::CameraToGripper)},
         {QStringLiteral("robot"), dataset.robotName}, {QStringLiteral("camera"), dataset.cameraName},
         {QStringLiteral("notes"), dataset.notes},
         {QStringLiteral("board_pattern"), boardPatternName(dataset.boardSpec.pattern)},
@@ -915,6 +1156,7 @@ IoResult writeJson(const QString &filePath, const CalibrationDataset &dataset)
         {QStringLiteral("marker_count_x"), dataset.boardSpec.markerCountX},
         {QStringLiteral("marker_count_y"), dataset.boardSpec.markerCountY},
         {QStringLiteral("marker_size_m"), dataset.boardSpec.markerSizeM},
+        {QStringLiteral("marker_separation_m"), dataset.boardSpec.markerSeparationM},
         {QStringLiteral("camera_intrinsics_valid"), dataset.cameraIntrinsics.valid},
         {QStringLiteral("camera_matrix"), matrix3ToJson(dataset.cameraIntrinsics.cameraMatrix)},
         {QStringLiteral("distortion_coeffs"), vector5ToJson(dataset.cameraIntrinsics.distortionCoeffs)},
@@ -928,9 +1170,11 @@ IoResult writeJson(const QString &filePath, const CalibrationDataset &dataset)
         {QStringLiteral("bootstrap_resamples"), dataset.bootstrapResamples},
         {QStringLiteral("bootstrap_confidence"), dataset.bootstrapConfidence},
         {QStringLiteral("created_at"), dataset.createdAt.toString(Qt::ISODate)},
+        {QStringLiteral("dataset_revision"), static_cast<qint64>(dataset.revision)},
         {QStringLiteral("target_poses_ready"), dataset.targetPosesReady},
         {QStringLiteral("samples"), samples}, {QStringLiteral("validation_samples"), validationSamples},
         {QStringLiteral("point_samples"), pointSamples},
+        {QStringLiteral("last_board_pdf_report"), boardPdfReportToJson(dataset.lastBoardPdfReport)},
         {QStringLiteral("reliability_pipeline_report"), reliabilityPipelineReportToJson(dataset.reliabilityPipelineReport)},
         {QStringLiteral("results"), results}};
     file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -955,6 +1199,17 @@ IoResult readJson(const QString &filePath, CalibrationDataset *dataset)
     parsed.inputSpec.lengthUnit = root.value(QStringLiteral("length_unit")).toString() == QStringLiteral("mm")
                                       ? LengthUnit::Millimeters : LengthUnit::Meters;
     parsed.inputSpec.adapter = adapterFromString(root.value(QStringLiteral("pose_adapter")).toString());
+    if (parsed.inputSpec.adapter == PoseAdapterKind::Kuka)
+        parsed.inputSpec.convention = PoseConvention::KukaAbcZyx;
+    else if (parsed.inputSpec.adapter == PoseAdapterKind::Fanuc)
+        parsed.inputSpec.convention = PoseConvention::FanucWprXyz;
+    else if (parsed.inputSpec.rotationFormat == RotationFormat::EulerXYZ)
+        parsed.inputSpec.convention = PoseConvention::EulerXYZIntrinsic;
+    else if (parsed.inputSpec.rotationFormat == RotationFormat::RPY)
+        parsed.inputSpec.convention = PoseConvention::RpyZyx;
+    if (root.contains(QStringLiteral("pose_convention")))
+        parsed.inputSpec.convention = conventionFromString(
+            root.value(QStringLiteral("pose_convention")).toString());
     parsed.robotName = root.value(QStringLiteral("robot")).toString(parsed.robotName);
     parsed.cameraName = root.value(QStringLiteral("camera")).toString(parsed.cameraName);
     parsed.notes = root.value(QStringLiteral("notes")).toString();
@@ -975,6 +1230,8 @@ IoResult readJson(const QString &filePath, CalibrationDataset *dataset)
                                         .toInt(parsed.boardSpec.markerCountY);
     parsed.boardSpec.markerSizeM = root.value(QStringLiteral("marker_size_m"))
                                        .toDouble(parsed.boardSpec.markerSizeM);
+    parsed.boardSpec.markerSeparationM = root.value(QStringLiteral("marker_separation_m"))
+                                             .toDouble(parsed.boardSpec.markerSeparationM);
     parsed.cameraIntrinsics.valid = root.value(QStringLiteral("camera_intrinsics_valid")).toBool(false);
     parsed.cameraIntrinsics.cameraMatrix = matrix3FromJson(root.value(QStringLiteral("camera_matrix")));
     parsed.cameraIntrinsics.distortionCoeffs = vector5FromJson(root.value(QStringLiteral("distortion_coeffs")));
@@ -990,12 +1247,15 @@ IoResult readJson(const QString &filePath, CalibrationDataset *dataset)
     parsed.bootstrapResamples = root.value(QStringLiteral("bootstrap_resamples")).toInt(parsed.bootstrapResamples);
     parsed.bootstrapConfidence = root.value(QStringLiteral("bootstrap_confidence")).toDouble(parsed.bootstrapConfidence);
     parsed.createdAt = QDateTime::fromString(root.value(QStringLiteral("created_at")).toString(), Qt::ISODate);
+    parsed.revision = static_cast<quint64>(root.value(QStringLiteral("dataset_revision")).toInteger());
     for (const QJsonValue &value : root.value(QStringLiteral("samples")).toArray())
         parsed.samples.append(sampleFromJson(value.toObject()));
     for (const QJsonValue &value : root.value(QStringLiteral("validation_samples")).toArray())
         parsed.validationSamples.append(sampleFromJson(value.toObject()));
     for (const QJsonValue &value : root.value(QStringLiteral("point_samples")).toArray())
         parsed.pointSamples.append(pointSampleFromJson(value.toObject()));
+    parsed.lastBoardPdfReport = boardPdfReportFromJson(
+        root.value(QStringLiteral("last_board_pdf_report")).toObject());
     for (const QJsonValue &value : root.value(QStringLiteral("results")).toArray())
         parsed.results.append(resultFromJson(value.toObject()));
     parsed.reliabilityPipelineReport = reliabilityPipelineReportFromJson(
@@ -1011,13 +1271,17 @@ IoResult writeYaml(const QString &filePath, const CalibrationDataset &dataset)
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return {false, file.errorString()};
     QTextStream stream(&file);
+    const bool eyeToHand = dataset.mode == CalibrationMode::EyeToHand;
     stream << "schema_version: 3\nmode: " << modeToString(dataset.mode) << "\n"
            << "input_mode: " << inputModeToString(dataset.inputMode) << "\n"
            << "robot: \"" << dataset.robotName << "\"\ncamera: \"" << dataset.cameraName << "\"\n"
            << "rotation_format: \"" << formatToString(dataset.inputSpec.rotationFormat) << "\"\n"
+           << "pose_convention: \"" << conventionToString(dataset.inputSpec.convention) << "\"\n"
            << "board_pattern: \"" << boardPatternName(dataset.boardSpec.pattern) << "\"\n"
            << "chessboard_detector: \"" << chessboardDetectorName(dataset.boardSpec.chessboardDetector) << "\"\n"
            << "pnp_method: \"" << pnpMethodName(dataset.boardSpec.pnpMethod) << "\"\n"
+           << "marker_size_m: " << dataset.boardSpec.markerSizeM << "\n"
+           << "marker_separation_m: " << dataset.boardSpec.markerSeparationM << "\n"
            << "angle_unit: " << angleUnitName(dataset.inputSpec.angleUnit) << "\nlength_unit: "
            << lengthUnitName(dataset.inputSpec.lengthUnit) << "\ncreated_at: \""
            << dataset.createdAt.toString(Qt::ISODate) << "\"\n"
@@ -1059,8 +1323,10 @@ IoResult writeYaml(const QString &filePath, const CalibrationDataset &dataset)
            << "  final_sample_count: " << dataset.reliabilityPipelineReport.finalSampleCount << "\n"
            << "  auto_removed_count: " << dataset.reliabilityPipelineReport.autoRemovedCount << "\n"
            << "  final_method: " << methodName(dataset.reliabilityPipelineReport.finalMethod) << "\n"
-           << "  final_camera_to_gripper:\n";
-    for (const auto &row : dataset.reliabilityPipelineReport.finalCameraToGripper)
+           << (eyeToHand ? "  final_camera_to_base:\n" : "  final_camera_to_gripper:\n");
+    const Matrix4 &pipelineMatrix = eyeToHand ? dataset.reliabilityPipelineReport.finalCameraToBase
+                                               : dataset.reliabilityPipelineReport.finalCameraToGripper;
+    for (const auto &row : pipelineMatrix)
         stream << "    - [" << row[0] << ", " << row[1] << ", " << row[2] << ", " << row[3] << "]\n";
     stream << "  stages:\n";
     for (const PipelineStageReport &stage : dataset.reliabilityPipelineReport.stages)
@@ -1071,9 +1337,25 @@ IoResult writeYaml(const QString &filePath, const CalibrationDataset &dataset)
            << "    requested_resamples: " << dataset.reliabilityPipelineReport.bootstrapReport.requestedResamples << "\n"
            << "    successful_resamples: " << dataset.reliabilityPipelineReport.bootstrapReport.successfulResamples << "\n"
            << "    confidence_level: " << dataset.reliabilityPipelineReport.bootstrapReport.confidenceLevel << "\n"
-           << "    confidence_score: " << dataset.reliabilityPipelineReport.bootstrapReport.confidenceScore << "\n"
+           << "    success_rate: " << dataset.reliabilityPipelineReport.bootstrapReport.successRate << "\n"
            << "    rotation_norm_std_deg: " << dataset.reliabilityPipelineReport.bootstrapReport.rotationNormStdDeg << "\n"
            << "    translation_norm_std_m: " << dataset.reliabilityPipelineReport.bootstrapReport.translationNormStdM << "\n"
+           << "last_board_pdf_report:\n"
+           << "  success: " << (dataset.lastBoardPdfReport.success ? "true" : "false") << "\n"
+           << "  reused: " << (dataset.lastBoardPdfReport.reused ? "true" : "false") << "\n"
+           << "  output_path: \"" << dataset.lastBoardPdfReport.outputPath << "\"\n"
+           << "  pattern: \"" << dataset.lastBoardPdfReport.pattern << "\"\n"
+           << "  output_mode: \"" << dataset.lastBoardPdfReport.outputMode << "\"\n"
+           << "  page_count: " << dataset.lastBoardPdfReport.pageCount << "\n"
+           << "  width_mm: " << dataset.lastBoardPdfReport.widthMm << "\n"
+           << "  height_mm: " << dataset.lastBoardPdfReport.heightMm << "\n"
+           << "  generated_at: \"" << dataset.lastBoardPdfReport.generatedAt.toString(Qt::ISODate) << "\"\n"
+           << "  warnings: [";
+    for (int index = 0; index < dataset.lastBoardPdfReport.warnings.size(); ++index) {
+        if (index > 0) stream << ", ";
+        stream << "\"" << dataset.lastBoardPdfReport.warnings.at(index) << "\"";
+    }
+    stream << "]\n"
            << "point_samples:\n";
     for (const PointSample &sample : dataset.pointSamples) {
         stream << "  - id: " << sample.id << "\n"
@@ -1085,25 +1367,38 @@ IoResult writeYaml(const QString &filePath, const CalibrationDataset &dataset)
     }
     stream << "results:\n";
     for (const CalibrationResult &result : dataset.results) {
+        const Matrix4 &resultMatrix = eyeToHand ? result.cameraToBase : result.cameraToGripper;
         stream << "  - method: " << methodName(result.method) << "\n"
                << "    success: " << (result.success ? "true" : "false") << "\n"
                << "    recommended: " << (result.recommended ? "true" : "false") << "\n"
-               << "    camera_to_gripper:\n";
-        for (const auto &row : result.cameraToGripper)
+               << (eyeToHand ? "    camera_to_base:\n" : "    camera_to_gripper:\n");
+        for (const auto &row : resultMatrix)
             stream << "      - [" << row[0] << ", " << row[1] << ", " << row[2] << ", " << row[3] << "]\n";
-        stream << "    rotation_rmse_deg: " << result.trainingReport.rotationRmseDeg << "\n"
-               << "    translation_rmse_m: " << result.trainingReport.translationRmseM << "\n"
-               << "    rotation_max_deg: " << result.trainingReport.rotationMaxDeg << "\n"
-               << "    translation_max_m: " << result.trainingReport.translationMaxM << "\n"
+        if (eyeToHand && result.eyeToHandPoseReport.available) {
+            stream << "    target_to_gripper:\n";
+            for (const auto &row : result.targetToGripper)
+                stream << "      - [" << row[0] << ", " << row[1] << ", " << row[2] << ", " << row[3] << "]\n";
+        }
+        if (eyeToHand && result.eyeToHandPointReport.available)
+            stream << "    point_in_gripper_m: " << vectorText(result.pointInGripper) << "\n";
+        stream << "    rotation_rmse_deg: " << result.axXbReport.rotationRmseDeg << "\n"
+               << "    translation_rmse_m: " << result.axXbReport.translationRmseM << "\n"
+               << "    rotation_max_deg: " << result.axXbReport.rotationMaxDeg << "\n"
+               << "    translation_max_m: " << result.axXbReport.translationMaxM << "\n"
+               << "    ax_xb_passed: " << (result.axXbReport.passed ? "true" : "false") << "\n"
+               << "    fixed_target_available: " << (result.fixedTargetReport.available ? "true" : "false") << "\n"
+               << "    fixed_target_rotation_rmse_deg: " << result.fixedTargetReport.rotationRmseDeg << "\n"
+               << "    fixed_target_translation_rmse_m: " << result.fixedTargetReport.translationRmseM << "\n"
+               << "    fixed_target_outlier_count: " << result.fixedTargetReport.outlierCount << "\n"
                << "    quality_score: " << result.qualityReport.totalScore << "\n"
                << "    quality_level: \"" << result.qualityReport.level << "\"\n"
                << "    optimization_before_translation_rmse_m: " << result.optimizationReport.beforeTranslationRmseM << "\n"
                << "    optimization_after_translation_rmse_m: " << result.optimizationReport.afterTranslationRmseM << "\n"
                << "    bootstrap_successful_resamples: " << result.bootstrapReport.successfulResamples << "\n"
-               << "    bootstrap_confidence_score: " << result.bootstrapReport.confidenceScore << "\n"
+               << "    bootstrap_success_rate: " << result.bootstrapReport.successRate << "\n"
                << "    bootstrap_rotation_norm_std_deg: " << result.bootstrapReport.rotationNormStdDeg << "\n"
                << "    bootstrap_translation_norm_std_m: " << result.bootstrapReport.translationNormStdM << "\n"
-               << "    passed: " << (result.trainingReport.passed ? "true" : "false") << "\n";
+               << "    passed: " << (result.axXbReport.passed ? "true" : "false") << "\n";
     }
     return {true, {}};
 }
@@ -1114,17 +1409,33 @@ IoResult writeResultTxt(const QString &filePath, const CalibrationDataset &datas
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return {false, file.errorString()};
     QTextStream stream(&file);
+    const bool eyeToHand = dataset.mode == CalibrationMode::EyeToHand;
+    const Matrix4 &primaryMatrix = eyeToHand ? result.cameraToBase : result.cameraToGripper;
     stream << "Hand-Eye Calibration Result\nmethod: " << methodName(result.method)
            << "\ninput mode: " << inputModeToString(dataset.inputMode)
            << "\nrobot: " << dataset.robotName << "\ncamera: " << dataset.cameraName
-           << "\nresult direction: camera -> gripper\n\n"
-           << matrixText(result.cameraToGripper) << "\n\n"
-           << "training rotation RMSE (deg): " << result.trainingReport.rotationRmseDeg
-           << "\ntraining translation RMSE (m): " << result.trainingReport.translationRmseM
-           << "\ntraining rotation mean/max (deg): " << result.trainingReport.rotationMeanDeg << "/"
-           << result.trainingReport.rotationMaxDeg << "\ntraining translation mean/max (m): "
-           << result.trainingReport.translationMeanM << "/" << result.trainingReport.translationMaxM
-           << "\npassed: " << (result.trainingReport.passed ? "true" : "false")
+           << "\nresult direction: " << (eyeToHand ? "camera -> base" : "camera -> gripper") << "\n\n"
+           << matrixText(primaryMatrix) << "\n\n";
+    if (eyeToHand && result.eyeToHandPoseReport.available)
+        stream << "target -> gripper:\n" << matrixText(result.targetToGripper) << "\n\n";
+    if (eyeToHand && result.eyeToHandPointReport.available)
+        stream << "point in gripper (m): " << vectorText(result.pointInGripper) << "\n\n";
+    stream
+           << "AX=XB rotation RMSE (deg): " << result.axXbReport.rotationRmseDeg
+           << "\nAX=XB translation RMSE (m): " << result.axXbReport.translationRmseM
+           << "\nAX=XB rotation mean/max (deg): " << result.axXbReport.rotationMeanDeg << "/"
+           << result.axXbReport.rotationMaxDeg << "\nAX=XB translation mean/max (m): "
+           << result.axXbReport.translationMeanM << "/" << result.axXbReport.translationMaxM
+           << "\npassed: " << (result.axXbReport.passed ? "true" : "false")
+           << "\n\nFixed Target consistency:\n"
+           << "available: " << (result.fixedTargetReport.available ? "true" : "false")
+           << "\nrotation RMSE (deg): " << result.fixedTargetReport.rotationRmseDeg
+           << "\ntranslation RMSE (m): " << result.fixedTargetReport.translationRmseM
+           << "\nmean rotation/translation: " << result.fixedTargetReport.rotationMeanDeg << " / "
+           << result.fixedTargetReport.translationMeanM
+           << "\nmax rotation/translation: " << result.fixedTargetReport.rotationMaxDeg << " / "
+           << result.fixedTargetReport.translationMaxM
+           << "\noutliers: " << result.fixedTargetReport.outlierCount
            << "\npose quality score: " << result.qualityReport.totalScore << " ("
            << result.qualityReport.level << ")"
            << "\noptimization translation RMSE before/after (m): "
@@ -1139,16 +1450,26 @@ IoResult writeResultCpp(const QString &filePath, const CalibrationDataset &datas
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return {false, file.errorString()};
     QTextStream stream(&file);
+    const bool eyeToHand = dataset.mode == CalibrationMode::EyeToHand;
+    const Matrix4 &primaryMatrix = eyeToHand ? result.cameraToBase : result.cameraToGripper;
     stream << "// Generated by Qt6 Hand-Eye Calibration Tool\n"
-           << "// Direction: camera -> gripper\n"
+           << "// Direction: " << (eyeToHand ? "camera -> base" : "camera -> gripper") << "\n"
            << "// Input mode: " << inputModeToString(dataset.inputMode) << "\n"
            << "// Robot: " << dataset.robotName << ", Camera: " << dataset.cameraName << "\n"
            << "// Pose quality score: " << result.qualityReport.totalScore << " ("
            << result.qualityReport.level << ")\n"
-           << "const cv::Matx44d cameraToGripper = (cv::Matx44d() << ";
+           << (eyeToHand ? "const cv::Matx44d cameraToBase = (cv::Matx44d() << "
+                          : "const cv::Matx44d cameraToGripper = (cv::Matx44d() << ");
     for (int row = 0; row < 4; ++row)
-        for (int col = 0; col < 4; ++col) stream << result.cameraToGripper[row][col] << (row == 3 && col == 3 ? ")" : ",");
+        for (int col = 0; col < 4; ++col) stream << primaryMatrix[row][col] << (row == 3 && col == 3 ? ")" : ",");
     stream << ";\n";
+    if (eyeToHand && result.eyeToHandPoseReport.available)
+        stream << "const cv::Matx44d targetToGripper = (cv::Matx44d() << ";
+    if (eyeToHand && result.eyeToHandPoseReport.available) {
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 4; ++col) stream << result.targetToGripper[row][col] << (row == 3 && col == 3 ? ")" : ",");
+        stream << ";\n";
+    }
     return {true, {}};
 }
 
@@ -1158,17 +1479,28 @@ IoResult writeResultPython(const QString &filePath, const CalibrationDataset &da
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return {false, file.errorString()};
     QTextStream stream(&file);
+    const bool eyeToHand = dataset.mode == CalibrationMode::EyeToHand;
+    const Matrix4 &primaryMatrix = eyeToHand ? result.cameraToBase : result.cameraToGripper;
     stream << "# Generated by Qt6 Hand-Eye Calibration Tool\n"
-           << "# Direction: camera -> gripper\n"
+           << "# Direction: " << (eyeToHand ? "camera -> base" : "camera -> gripper") << "\n"
            << "# Input mode: " << inputModeToString(dataset.inputMode) << "\n"
            << "# Robot: " << dataset.robotName << ", Camera: " << dataset.cameraName << "\n"
            << "# Pose quality score: " << result.qualityReport.totalScore << " ("
            << result.qualityReport.level << ")\n"
            << "import numpy as np\n\n"
-           << "camera_to_gripper = np.array([\n";
-    for (const auto &row : result.cameraToGripper)
+           << (eyeToHand ? "camera_to_base = np.array([\n" : "camera_to_gripper = np.array([\n");
+    for (const auto &row : primaryMatrix)
         stream << "    [" << row[0] << ", " << row[1] << ", " << row[2] << ", " << row[3] << "],\n";
     stream << "], dtype=float)\n";
+    if (eyeToHand && result.eyeToHandPoseReport.available) {
+        stream << "\ntarget_to_gripper = np.array([\n";
+        for (const auto &row : result.targetToGripper)
+            stream << "    [" << row[0] << ", " << row[1] << ", " << row[2] << ", " << row[3] << "],\n";
+        stream << "], dtype=float)\n";
+    }
+    if (eyeToHand && result.eyeToHandPointReport.available)
+        stream << "\npoint_in_gripper = np.array([" << result.pointInGripper[0] << ", "
+               << result.pointInGripper[1] << ", " << result.pointInGripper[2] << "], dtype=float)\n";
     return {true, {}};
 }
 

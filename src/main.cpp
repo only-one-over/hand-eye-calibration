@@ -15,6 +15,7 @@
 #include "io/dataset_io.h"
 #include "io/image_sample_io.h"
 #include "views/calibration_result_page.h"
+#include "views/board_pdf_page.h"
 #include "views/camera_calibration_page.h"
 #include "views/current_data_page.h"
 #include "views/manual_pose_page.h"
@@ -22,6 +23,7 @@
 #include <QApplication>
 #include <QDebug>
 #include <QFile>
+#include <QLabel>
 #include <QTextStream>
 #include <QTemporaryDir>
 #include <QPushButton>
@@ -148,14 +150,16 @@ int main(int argc, char *argv[])
                 maxTruthError = std::max(maxTruthError, matrixMaxError(result.cameraToGripper,
                                                                          dataset.groundTruthCameraToGripper));
             smokeStream << handeye::methodName(result.method) << "|" << result.success << "|"
-                        << result.message << "|rmse=" << result.trainingReport.rotationRmseDeg
-                        << "," << result.trainingReport.translationRmseM << Qt::endl;
+                        << result.message << "|rmse=" << result.axXbReport.rotationRmseDeg
+                        << "," << result.axXbReport.translationRmseM << Qt::endl;
         }
 
+        handeye::PoseInputSpec degreeMmSpec;
+        degreeMmSpec.rotationFormat = handeye::RotationFormat::Rodrigues;
+        degreeMmSpec.angleUnit = handeye::AngleUnit::Degrees;
+        degreeMmSpec.lengthUnit = handeye::LengthUnit::Millimeters;
         const auto degreeMm = handeye::pose::normalize({0.0, 0.0, 90.0, 0.0}, {1000.0, 0.0, 0.0},
-                                                       {handeye::RotationFormat::Rodrigues,
-                                                        handeye::AngleUnit::Degrees,
-                                                        handeye::LengthUnit::Millimeters});
+                                                       degreeMmSpec);
         const bool normalizationOk = degreeMm.success
                                       && std::abs(degreeMm.rotation[2] - CV_PI / 2.0) < 1e-10
                                       && std::abs(degreeMm.translation[0] - 1.0) < 1e-10;
@@ -171,7 +175,7 @@ int main(int argc, char *argv[])
         outlierDataset.samples.last().targetTranslation[0] += 0.2;
         const auto outlierResult = handeye::CalibrationService::calibrate(outlierDataset,
                                                                            handeye::CalibrationMethod::Tsai);
-        const bool outlierDetectionOk = outlierResult.trainingReport.outlierCount > 0;
+        const bool outlierDetectionOk = outlierResult.axXbReport.outlierCount > 0;
 
         handeye::CalibrationDataset degenerateDataset = dataset;
         for (handeye::PoseSample &sample : degenerateDataset.samples)
@@ -389,6 +393,7 @@ int main(int argc, char *argv[])
         const auto *tabs = smokeWindow.findChild<QTabWidget *>(QStringLiteral("mainTabs"));
         const QStringList expectedTabs = {QStringLiteral("首页"), QStringLiteral("采集"), QStringLiteral("参数"),
                                           QStringLiteral("相机内参"), QStringLiteral("手动输入"),
+                                          QStringLiteral("标定板 PDF"),
                                           QStringLiteral("当前数据"), QStringLiteral("标定结果")};
         bool uiTabsOk = tabs && tabs->count() == expectedTabs.size();
         if (uiTabsOk) {
@@ -408,6 +413,25 @@ int main(int argc, char *argv[])
                                  && hasButton(QStringLiteral("应用并计算五种算法"))
                                  && hasButton(QStringLiteral("五种算法自动比较并推荐"))
                                  && hasButton(QStringLiteral("执行完整可靠性流水线"));
+        const bool uiFlowOk = smokeWindow.findChild<QPushButton *>(QStringLiteral("startCalibrationButton"))
+                              && smokeWindow.findChild<QPushButton *>(QStringLiteral("parametersNextButton"))
+                              && smokeWindow.findChild<QPushButton *>(QStringLiteral("captureNextButton"))
+                              && smokeWindow.findChild<QPushButton *>(QStringLiteral("currentDataNextButton"));
+        const bool uiBoardPdfOk = hasButton(QStringLiteral("生成当前参数的标定板 PDF"))
+                                  && hasButton(QStringLiteral("生成 1:1 单页 PDF"))
+                                  && hasButton(QStringLiteral("生成 A4 分块 PDF"))
+                                  && hasButton(QStringLiteral("另存 1:1 单页 PDF"))
+                                  && hasButton(QStringLiteral("另存 A4 分块 PDF"))
+                                  && hasButton(QStringLiteral("打开输出目录"))
+                                  && hasButton(QStringLiteral("打开说明文档目录"));
+        const auto *boardPdfPage = smokeWindow.findChild<handeye::BoardPdfPage *>();
+        const bool uiBoardPdfPageOk = boardPdfPage
+                                      && smokeWindow.findChild<QPushButton *>(QStringLiteral("generateCustomBoardPdfButton"))
+                                      && smokeWindow.findChild<QPushButton *>(QStringLiteral("generateA4BoardPdfButton"))
+                                      && smokeWindow.findChild<QPushButton *>(QStringLiteral("saveAsCustomBoardPdfButton"))
+                                      && smokeWindow.findChild<QPushButton *>(QStringLiteral("saveAsA4BoardPdfButton"))
+                                      && smokeWindow.findChild<QPushButton *>(QStringLiteral("openBoardPdfDirectoryButton"))
+                                      && smokeWindow.findChild<QLabel *>(QStringLiteral("boardPdfOutputDirectoryLabel"));
         auto *cameraPage = smokeWindow.findChild<handeye::CameraCalibrationPage *>();
         if (cameraPage) {
             cameraPage->setBoardSpec(cameraBoard);
@@ -431,7 +455,8 @@ int main(int argc, char *argv[])
         const auto *resultMatrix = smokeWindow.findChild<QPlainTextEdit *>(QStringLiteral("resultMatrix"));
         const bool uiResultOk = resultPage && resultMatrix
                                 && resultMatrix->toPlainText().contains(QStringLiteral("camera→gripper"));
-        const bool uiSmokeOk = uiTabsOk && uiActionsOk && uiCameraPageOk && uiManualPageOk
+        const bool uiSmokeOk = uiTabsOk && uiActionsOk && uiFlowOk && uiBoardPdfOk && uiBoardPdfPageOk
+                               && uiCameraPageOk && uiManualPageOk
                                && uiDataOk && uiResultOk;
 
         const bool allOk = successCount == handeye::allMethods().size()
@@ -468,7 +493,9 @@ int main(int argc, char *argv[])
                     << ",pipeline_json=" << pipelineJsonOk
                     << ",bootstrap=" << pipelineExecution.report.bootstrapReport.success
                     << ",removed=" << pipelineExecution.report.autoRemovedCount << Qt::endl;
-        smokeStream << "ui_tabs=" << uiTabsOk << ",ui_actions=" << uiActionsOk
+        smokeStream << "ui_tabs=" << uiTabsOk << ",ui_actions=" << uiActionsOk << ",ui_flow=" << uiFlowOk
+                    << ",ui_board_pdf=" << uiBoardPdfOk
+                    << ",ui_board_pdf_page=" << uiBoardPdfPageOk
                     << ",ui_camera_page=" << uiCameraPageOk
                     << ",ui_manual_page=" << uiManualPageOk
                     << ",ui_data_table=" << uiDataOk << ",ui_result_matrix=" << uiResultOk << Qt::endl;

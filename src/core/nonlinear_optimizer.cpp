@@ -1,6 +1,7 @@
 #include "core/nonlinear_optimizer.h"
 
 #include "core/matrix_utils.h"
+#include "core/normalized_huber.h"
 #include "core/pose_quality_service.h"
 
 #include <opencv2/core.hpp>
@@ -19,30 +20,14 @@ struct State {
 struct ResidualSet {
     QVector<cv::Vec3d> rotation;
     QVector<cv::Vec3d> translation;
+    QVector<double> normalizedScores;
+    QVector<double> weights;
     double loss = 0.0;
 };
 
 cv::Vec3d translationOf(const cv::Matx44d &pose)
 {
     return {pose(0, 3), pose(1, 3), pose(2, 3)};
-}
-
-double norm3(const cv::Vec3d &value)
-{
-    return std::sqrt(value.dot(value));
-}
-
-double huberLoss(double value, double threshold)
-{
-    const double absolute = std::abs(value);
-    if (absolute <= threshold) return 0.5 * value * value;
-    return threshold * (absolute - 0.5 * threshold);
-}
-
-double huberWeight(double value, double threshold)
-{
-    const double absolute = std::abs(value);
-    return absolute <= threshold ? 1.0 : threshold / std::max(absolute, 1e-12);
 }
 
 ResidualSet residuals(const CalibrationDataset &dataset, const State &state)
@@ -64,10 +49,12 @@ ResidualSet residuals(const CalibrationDataset &dataset, const State &state)
         const cv::Vec3d rotation(rotationVector[0], rotationVector[1], rotationVector[2]);
         result.rotation.append(rotation);
         result.translation.append(translation);
-        for (int component = 0; component < 3; ++component) {
-            result.loss += huberLoss(rotation[component], CV_PI / 180.0);
-            result.loss += huberLoss(translation[component], 0.001);
-        }
+        const NormalizedHuberEvaluation evaluation = NormalizedHuber::evaluate(
+            {rotation[0], rotation[1], rotation[2]},
+            {translation[0], translation[1], translation[2]});
+        result.normalizedScores.append(evaluation.norm);
+        result.weights.append(evaluation.weight);
+        result.loss += evaluation.loss;
     }
     return result;
 }
@@ -76,19 +63,20 @@ void fillReportFromFixedPose(const FixedTargetPoseReport &fixed,
                              CalibrationResult *result)
 {
     result->fixedTargetReport = fixed;
-    result->trainingReport.available = fixed.success;
-    result->trainingReport.valid = fixed.success;
-    result->trainingReport.sampleCount = fixed.samples.size();
-    result->trainingReport.outlierCount = fixed.outlierCount;
-    result->trainingReport.rotationRmseDeg = fixed.rotationRmseDeg;
-    result->trainingReport.translationRmseM = fixed.translationRmseM;
-    result->trainingReport.rotationMeanDeg = fixed.rotationMeanDeg;
-    result->trainingReport.translationMeanM = fixed.translationMeanM;
-    result->trainingReport.rotationMaxDeg = fixed.rotationMaxDeg;
-    result->trainingReport.translationMaxM = fixed.translationMaxM;
-    result->trainingReport.passed = fixed.success && fixed.outlierCount == 0
+    result->axXbReport.available = fixed.success;
+    result->axXbReport.valid = fixed.success;
+    result->axXbReport.sampleCount = fixed.samples.size();
+    result->axXbReport.outlierCount = fixed.outlierCount;
+    result->axXbReport.rotationRmseDeg = fixed.rotationRmseDeg;
+    result->axXbReport.translationRmseM = fixed.translationRmseM;
+    result->axXbReport.rotationMeanDeg = fixed.rotationMeanDeg;
+    result->axXbReport.translationMeanM = fixed.translationMeanM;
+    result->axXbReport.rotationMaxDeg = fixed.rotationMaxDeg;
+    result->axXbReport.translationMaxM = fixed.translationMaxM;
+    result->axXbReport.passed = fixed.success && fixed.outlierCount == 0
                                     && fixed.rotationRmseDeg <= 0.5
                                     && fixed.translationRmseM <= 0.001;
+    result->trainingReport = result->axXbReport;
     result->rotationErrorDeg = fixed.rotationRmseDeg;
     result->translationError = fixed.translationRmseM;
 }
@@ -100,6 +88,7 @@ CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &datas
 {
     CalibrationResult result = seed;
     result.method = CalibrationMethod::Nonlinear;
+    result.seedMethod = seed.method == CalibrationMethod::Nonlinear ? seed.seedMethod : seed.method;
     result.recommended = false;
     result.qualityReport = PoseQualityService::evaluatePoseQuality(dataset);
     result.optimizationReport = {};
@@ -116,7 +105,9 @@ CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &datas
         dataset, seed.cameraToGripper);
     result.optimizationReport.beforeRotationRmseDeg = before.rotationRmseDeg;
     result.optimizationReport.beforeTranslationRmseM = before.translationRmseM;
-    double currentLoss = residuals(dataset, state).loss;
+    const ResidualSet initialResiduals = residuals(dataset, state);
+    result.optimizationReport.normalizedHuberLossBefore = initialResiduals.loss;
+    double currentLoss = initialResiduals.loss;
     double lambda = 1e-3;
     for (int iteration = 0; iteration < 50; ++iteration) {
         const ResidualSet base = residuals(dataset, state);
@@ -124,9 +115,13 @@ CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &datas
         cv::Mat gradient = cv::Mat::zeros(6, 1, CV_64F);
         for (int sampleIndex = 0; sampleIndex < dataset.samples.size(); ++sampleIndex) {
             cv::Mat jacobian(6, 6, CV_64F, cv::Scalar(0));
-            const double values[6] = {base.rotation.at(sampleIndex)[0], base.rotation.at(sampleIndex)[1],
-                                      base.rotation.at(sampleIndex)[2], base.translation.at(sampleIndex)[0],
-                                      base.translation.at(sampleIndex)[1], base.translation.at(sampleIndex)[2]};
+            const double values[6] = {
+                base.rotation.at(sampleIndex)[0] / (CV_PI / 180.0),
+                base.rotation.at(sampleIndex)[1] / (CV_PI / 180.0),
+                base.rotation.at(sampleIndex)[2] / (CV_PI / 180.0),
+                base.translation.at(sampleIndex)[0] / 0.001,
+                base.translation.at(sampleIndex)[1] / 0.001,
+                base.translation.at(sampleIndex)[2] / 0.001};
             for (int parameter = 0; parameter < 6; ++parameter) {
                 State perturbed = state;
                 const double step = parameter < 3 ? 1e-6 : 1e-7;
@@ -136,17 +131,20 @@ CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &datas
                 else translation[parameter - 3] += step;
                 perturbed.pose = matrix::fromRodrigues(rotation, translation);
                 const ResidualSet changed = residuals(dataset, perturbed);
-                const double changedValues[6] = {changed.rotation.at(sampleIndex)[0], changed.rotation.at(sampleIndex)[1],
-                                                 changed.rotation.at(sampleIndex)[2], changed.translation.at(sampleIndex)[0],
-                                                 changed.translation.at(sampleIndex)[1], changed.translation.at(sampleIndex)[2]};
+                const double changedValues[6] = {
+                    changed.rotation.at(sampleIndex)[0] / (CV_PI / 180.0),
+                    changed.rotation.at(sampleIndex)[1] / (CV_PI / 180.0),
+                    changed.rotation.at(sampleIndex)[2] / (CV_PI / 180.0),
+                    changed.translation.at(sampleIndex)[0] / 0.001,
+                    changed.translation.at(sampleIndex)[1] / 0.001,
+                    changed.translation.at(sampleIndex)[2] / 0.001};
                 for (int component = 0; component < 6; ++component)
                     jacobian.at<double>(component, parameter) = (changedValues[component] - values[component]) / step;
             }
             cv::Mat residual(6, 1, CV_64F);
             for (int component = 0; component < 6; ++component) residual.at<double>(component, 0) = values[component];
             for (int component = 0; component < 6; ++component) {
-                const double threshold = component < 3 ? CV_PI / 180.0 : 0.001;
-                const double weight = huberWeight(values[component], threshold);
+                const double weight = base.weights.at(sampleIndex);
                 const cv::Mat row = jacobian.row(component);
                 hessian += weight * row.t() * row;
                 gradient += weight * row.t() * residual.row(component).t();
@@ -183,8 +181,12 @@ CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &datas
     fillReportFromFixedPose(after, &result);
     result.optimizationReport.afterRotationRmseDeg = after.rotationRmseDeg;
     result.optimizationReport.afterTranslationRmseM = after.translationRmseM;
+    const ResidualSet finalResiduals = residuals(dataset, state);
+    result.optimizationReport.normalizedHuberLossAfter = finalResiduals.loss;
     result.optimizationReport.success = after.success;
-    result.optimizationReport.huberOutlierCount = after.outlierCount;
+    result.optimizationReport.huberOutlierCount = 0;
+    for (double score : finalResiduals.normalizedScores)
+        result.optimizationReport.huberOutlierCount += score > 1.0 ? 1 : 0;
     result.message = result.optimizationReport.converged
                          ? QStringLiteral("非线性精修收敛。")
                          : QStringLiteral("非线性精修完成，但未达到严格收敛条件。");

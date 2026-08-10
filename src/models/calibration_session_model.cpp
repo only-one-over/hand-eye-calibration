@@ -50,12 +50,19 @@ QVariant SampleTableModel::headerData(int section, Qt::Orientation orientation, 
 {
     if (role != Qt::DisplayRole) return {};
     if (orientation == Qt::Vertical) return section + 1;
-    static const QStringList headers = {QStringLiteral("ID"), QStringLiteral("标签"),
-        QStringLiteral("G Rx"), QStringLiteral("G Ry"), QStringLiteral("G Rz"),
-        QStringLiteral("G Tx"), QStringLiteral("G Ty"), QStringLiteral("G Tz"),
-        QStringLiteral("T Rx"), QStringLiteral("T Ry"), QStringLiteral("T Rz"),
-        QStringLiteral("T Tx"), QStringLiteral("T Ty"), QStringLiteral("T Tz"),
-        QStringLiteral("旋转残差(°)"), QStringLiteral("平移残差(m)"), QStringLiteral("样本状态")};
+    const QStringList headers = m_mode == CalibrationMode::EyeToHand && m_inputMode == CalibrationInputMode::PosePairs
+        ? QStringList{QStringLiteral("ID"), QStringLiteral("标签"),
+                      QStringLiteral("TCP Rx"), QStringLiteral("TCP Ry"), QStringLiteral("TCP Rz"),
+                      QStringLiteral("TCP Tx"), QStringLiteral("TCP Ty"), QStringLiteral("TCP Tz"),
+                      QStringLiteral("target→camera Rx"), QStringLiteral("target→camera Ry"), QStringLiteral("target→camera Rz"),
+                      QStringLiteral("target→camera Tx"), QStringLiteral("target→camera Ty"), QStringLiteral("target→camera Tz"),
+                      QStringLiteral("旋转残差(°)"), QStringLiteral("平移残差(m)"), QStringLiteral("样本状态")}
+        : QStringList{QStringLiteral("ID"), QStringLiteral("标签"),
+                      QStringLiteral("G Rx"), QStringLiteral("G Ry"), QStringLiteral("G Rz"),
+                      QStringLiteral("G Tx"), QStringLiteral("G Ty"), QStringLiteral("G Tz"),
+                      QStringLiteral("T Rx"), QStringLiteral("T Ry"), QStringLiteral("T Rz"),
+                      QStringLiteral("T Tx"), QStringLiteral("T Ty"), QStringLiteral("T Tz"),
+                      QStringLiteral("旋转残差(°)"), QStringLiteral("平移残差(m)"), QStringLiteral("样本状态")};
     if (section == 17) return QStringLiteral("图片路径");
     if (section == 18) return QStringLiteral("图片状态");
     if (section == 19) return QStringLiteral("角点数");
@@ -68,6 +75,16 @@ void SampleTableModel::setSamples(const QVector<PoseSample> &samples)
     beginResetModel();
     m_samples = samples;
     endResetModel();
+}
+
+void SampleTableModel::setMode(CalibrationMode mode, CalibrationInputMode inputMode)
+{
+    m_mode = mode;
+    m_inputMode = inputMode;
+    if (!m_samples.isEmpty()) {
+        beginResetModel();
+        endResetModel();
+    }
 }
 
 void SampleTableModel::clear()
@@ -93,23 +110,23 @@ QVariant ResultTableModel::data(const QModelIndex &index, int role) const
     const CalibrationResult &result = m_results.at(index.row());
     if (role == Qt::ForegroundRole) {
         if (result.recommended) return QBrush(QColor("#15A877"));
-        if (!result.trainingReport.passed) return QBrush(QColor("#E8463A"));
+        if (!result.axXbReport.passed) return QBrush(QColor("#E8463A"));
     }
     if (role == Qt::BackgroundRole) {
         if (result.recommended) return QBrush(QColor("#E8F6F1"));
-        if (!result.trainingReport.passed && result.success) return QBrush(QColor("#FCEBEA"));
+        if (!result.axXbReport.passed && result.success) return QBrush(QColor("#FCEBEA"));
     }
     if (role != Qt::DisplayRole) return {};
     switch (index.column()) {
     case 0: return methodName(result.method);
     case 1: return result.success ? QStringLiteral("成功") : QStringLiteral("失败");
-    case 2: return QLocale().toString(result.trainingReport.rotationRmseDeg, 'f', 5);
-    case 3: return QLocale().toString(result.trainingReport.translationRmseM, 'f', 7);
-    case 4: return QLocale().toString(result.trainingReport.rotationMeanDeg, 'f', 5);
-    case 5: return QLocale().toString(result.trainingReport.rotationMaxDeg, 'f', 5);
-    case 6: return QLocale().toString(result.trainingReport.translationMeanM, 'f', 7);
-    case 7: return QLocale().toString(result.trainingReport.translationMaxM, 'f', 7);
-    case 8: return result.trainingReport.passed ? QStringLiteral("通过") : QStringLiteral("未通过");
+    case 2: return QLocale().toString(result.axXbReport.rotationRmseDeg, 'f', 5);
+    case 3: return QLocale().toString(result.axXbReport.translationRmseM, 'f', 7);
+    case 4: return QLocale().toString(result.axXbReport.rotationMeanDeg, 'f', 5);
+    case 5: return QLocale().toString(result.axXbReport.rotationMaxDeg, 'f', 5);
+    case 6: return QLocale().toString(result.axXbReport.translationMeanM, 'f', 7);
+    case 7: return QLocale().toString(result.axXbReport.translationMaxM, 'f', 7);
+    case 8: return result.axXbReport.passed ? QStringLiteral("通过") : QStringLiteral("未通过");
     case 9: return result.recommended ? QStringLiteral("推荐") : QString{};
     case 10: return result.message;
     }

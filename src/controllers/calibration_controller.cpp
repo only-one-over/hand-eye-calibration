@@ -3,6 +3,7 @@
 #include "core/board_pose_estimator.h"
 #include "core/camera_calibration_service.h"
 #include "core/calibration_service.h"
+#include "core/eye_to_hand_calibration_service.h"
 #include "core/dataset_validator.h"
 #include "core/matrix_utils.h"
 #include "core/nonlinear_optimizer.h"
@@ -23,6 +24,48 @@
 
 namespace handeye {
 
+namespace {
+
+bool matrix3Equal(const Matrix3 &left, const Matrix3 &right)
+{
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            if (std::abs(left[row][col] - right[row][col]) > 1e-12) return false;
+    return true;
+}
+
+bool intrinsicsEqual(const CameraIntrinsics &left, const CameraIntrinsics &right)
+{
+    if (left.valid != right.valid || left.imageWidth != right.imageWidth
+        || left.imageHeight != right.imageHeight || !matrix3Equal(left.cameraMatrix, right.cameraMatrix))
+        return false;
+    for (int index = 0; index < 5; ++index)
+        if (std::abs(left.distortionCoeffs[index] - right.distortionCoeffs[index]) > 1e-12) return false;
+    return true;
+}
+
+bool inputSpecEqual(const PoseInputSpec &left, const PoseInputSpec &right)
+{
+    return left.rotationFormat == right.rotationFormat && left.convention == right.convention
+           && left.angleUnit == right.angleUnit && left.lengthUnit == right.lengthUnit
+           && left.adapter == right.adapter && left.direction == right.direction
+           && left.quaternionWFirst == right.quaternionWFirst;
+}
+
+bool boardSpecEqual(const BoardSpec &left, const BoardSpec &right)
+{
+    return left.pattern == right.pattern && left.chessboardDetector == right.chessboardDetector
+           && left.pnpMethod == right.pnpMethod && left.innerCornersX == right.innerCornersX
+           && left.innerCornersY == right.innerCornersY
+           && std::abs(left.squareSizeM - right.squareSizeM) <= 1e-12
+           && left.arucoDictionary == right.arucoDictionary && left.markerCountX == right.markerCountX
+           && left.markerCountY == right.markerCountY
+           && std::abs(left.markerSizeM - right.markerSizeM) <= 1e-12
+           && std::abs(left.markerSeparationM - right.markerSeparationM) <= 1e-12;
+}
+
+} // namespace
+
 CalibrationController::CalibrationController(QObject *parent) : QObject(parent) {}
 
 const CalibrationDataset &CalibrationController::dataset() const
@@ -30,42 +73,82 @@ const CalibrationDataset &CalibrationController::dataset() const
     return m_dataset;
 }
 
+void CalibrationController::synchronizeParameters(const PoseInputSpec &spec, const QString &robot,
+                                                   const QString &camera, const BoardSpec &board,
+                                                   const CameraIntrinsics &intrinsics,
+                                                   double rotationRmseDeg, double translationRmseM,
+                                                   CalibrationMode mode, CalibrationInputMode inputMode)
+{
+    PoseInputSpec normalizedSpec = spec;
+    normalizedSpec.direction = PoseDirection::GripperToBase;
+    const bool specChanged = !inputSpecEqual(m_dataset.inputSpec, normalizedSpec)
+                             || m_dataset.robotName != robot || m_dataset.cameraName != camera;
+    const bool boardChanged = !boardSpecEqual(m_dataset.boardSpec, board);
+    const bool intrinsicsChanged = !intrinsicsEqual(m_dataset.cameraIntrinsics, intrinsics);
+    const bool modeChanged = m_dataset.mode != mode || m_dataset.inputMode != inputMode;
+    const bool thresholdsChanged = std::abs(m_dataset.passRotationRmseDeg - rotationRmseDeg) > 1e-12
+                                   || std::abs(m_dataset.passTranslationRmseM - translationRmseM) > 1e-12;
+    if (!specChanged && !boardChanged && !intrinsicsChanged && !thresholdsChanged && !modeChanged) return;
+
+    m_dataset.inputSpec = normalizedSpec;
+    m_dataset.robotName = robot;
+    m_dataset.cameraName = camera;
+    m_dataset.boardSpec = board;
+    m_dataset.cameraIntrinsics = intrinsics;
+    m_dataset.mode = mode;
+    m_dataset.inputMode = inputMode;
+    if (rotationRmseDeg > 0.0) m_dataset.passRotationRmseDeg = rotationRmseDeg;
+    if (translationRmseM > 0.0) m_dataset.passTranslationRmseM = translationRmseM;
+    ++m_dataset.revision;
+
+    if (boardChanged || intrinsicsChanged) {
+        m_dataset.cameraCalibrationReport = {};
+        invalidateComputedState(true, QStringLiteral("棋盘格或相机参数已变化，图片 PnP 位姿需要重新处理。"));
+    } else if (thresholdsChanged || modeChanged) {
+        m_dataset.results.clear();
+        m_dataset.reliabilityPipelineReport = {};
+        emit resultsChanged(m_dataset.results);
+        emit reliabilityChanged(CalibrationResult{});
+        emit matrixChanged(CalibrationResult{});
+        emit statusChanged(modeChanged ? QStringLiteral("标定模式或输入模式已切换，已清除不兼容结果。")
+                                       : QStringLiteral("可靠性阈值已变化，结果需要重新评价。"));
+    } else {
+        emit statusChanged(QStringLiteral("输入规范已更新，已有规范化样本保持不变。"));
+    }
+    emit inputSpecChanged(m_dataset.robotName, m_dataset.cameraName);
+}
+
 void CalibrationController::updateInputSpec(const PoseInputSpec &spec, const QString &robot,
                                              const QString &camera)
 {
-    m_dataset.inputSpec = spec;
-    m_dataset.inputSpec.direction = PoseDirection::GripperToBase;
-    m_dataset.robotName = robot;
-    m_dataset.cameraName = camera;
+    synchronizeParameters(spec, robot, camera, m_dataset.boardSpec, m_dataset.cameraIntrinsics,
+                          m_dataset.passRotationRmseDeg, m_dataset.passTranslationRmseM,
+                          m_dataset.mode, m_dataset.inputMode);
 }
 
 void CalibrationController::updateImageProcessing(const BoardSpec &board,
                                                    const CameraIntrinsics &intrinsics)
 {
-    const bool boardChanged = m_dataset.boardSpec.pattern != board.pattern
-                              || m_dataset.boardSpec.chessboardDetector != board.chessboardDetector
-                              || m_dataset.boardSpec.pnpMethod != board.pnpMethod
-                              || m_dataset.boardSpec.innerCornersX != board.innerCornersX
-                              || m_dataset.boardSpec.innerCornersY != board.innerCornersY
-                              || std::abs(m_dataset.boardSpec.squareSizeM - board.squareSizeM) > 1e-12
-                              || m_dataset.boardSpec.arucoDictionary != board.arucoDictionary
-                              || m_dataset.boardSpec.markerCountX != board.markerCountX
-                              || m_dataset.boardSpec.markerCountY != board.markerCountY
-                              || std::abs(m_dataset.boardSpec.markerSizeM - board.markerSizeM) > 1e-12;
-    m_dataset.boardSpec = board;
-    m_dataset.cameraIntrinsics = intrinsics;
-    m_dataset.results.clear();
-    if (boardChanged) {
-        m_dataset.cameraCalibrationReport = {};
-        emit cameraCalibrationChanged(m_dataset.cameraCalibrationReport);
-    }
+    synchronizeParameters(m_dataset.inputSpec, m_dataset.robotName, m_dataset.cameraName, board, intrinsics,
+                          m_dataset.passRotationRmseDeg, m_dataset.passTranslationRmseM,
+                          m_dataset.mode, m_dataset.inputMode);
 }
 
 void CalibrationController::updateReliabilityThresholds(double rotationRmseDeg, double translationRmseM)
 {
-    if (rotationRmseDeg > 0.0) m_dataset.passRotationRmseDeg = rotationRmseDeg;
-    if (translationRmseM > 0.0) m_dataset.passTranslationRmseM = translationRmseM;
-    m_dataset.results.clear();
+    synchronizeParameters(m_dataset.inputSpec, m_dataset.robotName, m_dataset.cameraName, m_dataset.boardSpec,
+                          m_dataset.cameraIntrinsics, rotationRmseDeg, translationRmseM,
+                          m_dataset.mode, m_dataset.inputMode);
+}
+
+void CalibrationController::recordBoardPdfReport(const BoardPdfReport &report)
+{
+    if (!report.success) return;
+    m_dataset.lastBoardPdfReport = report;
+    ++m_dataset.revision;
+    emit statusChanged((report.reused ? QStringLiteral("已复用同规格标定板 PDF：%1")
+                                      : QStringLiteral("标定板 PDF 已生成：%1"))
+                           .arg(report.outputPath));
 }
 
 void CalibrationController::emitDatasetChanged()
@@ -78,18 +161,87 @@ void CalibrationController::emitDatasetChanged()
     emit cameraCalibrationChanged(m_dataset.cameraCalibrationReport);
 }
 
+void CalibrationController::clearImageBackedPoses()
+{
+    auto clear = [](PoseSample &sample) {
+        if (sample.imageStatus == ImageSampleStatus::ManualPose || sample.imagePath.trimmed().isEmpty()) return;
+        sample.targetRotation = {};
+        sample.targetTranslation = {};
+        sample.rotationResidualDeg = 0.0;
+        sample.translationResidualM = 0.0;
+        sample.outlier = false;
+        sample.imageStatus = ImageSampleStatus::NotProcessed;
+        sample.detectedCornerCount = 0;
+        sample.pnpReprojectionRmsePx = 0.0;
+        sample.imageMessage = QStringLiteral("参数已变化，请重新处理图片。 ");
+        sample.imageCenterXNorm = 0.5;
+        sample.imageCenterYNorm = 0.5;
+        sample.detectionMethod.clear();
+        sample.selectedPnpMethod = PnpMethod::Auto;
+        sample.iterativePnpRmsePx = 0.0;
+        sample.ippePnpRmsePx = 0.0;
+    };
+    for (PoseSample &sample : m_dataset.samples) clear(sample);
+    for (PoseSample &sample : m_dataset.validationSamples) clear(sample);
+    bool imagePosesReady = true;
+    bool hasImageBackedSample = false;
+    for (const PoseSample &sample : m_dataset.samples) {
+        if (sample.imagePath.trimmed().isEmpty() || sample.imageStatus == ImageSampleStatus::ManualPose) continue;
+        hasImageBackedSample = true;
+        imagePosesReady = imagePosesReady && sample.imageStatus == ImageSampleStatus::PoseEstimated;
+    }
+    m_dataset.targetPosesReady = !hasImageBackedSample || imagePosesReady;
+}
+
+void CalibrationController::invalidateComputedState(bool invalidateImagePoses, const QString &reason)
+{
+    if (invalidateImagePoses) clearImageBackedPoses();
+    m_dataset.results.clear();
+    m_dataset.reliabilityPipelineReport = {};
+    for (PoseSample &sample : m_dataset.samples) {
+        sample.rotationResidualDeg = 0.0;
+        sample.translationResidualM = 0.0;
+        sample.outlier = false;
+    }
+    emitDatasetChanged();
+    emit reliabilityChanged(CalibrationResult{});
+    emit matrixChanged(CalibrationResult{});
+    emit reliabilityPipelineChanged(ReliabilityPipelineReport{});
+    emit logMessage(reason);
+    emit statusChanged(reason);
+}
+
+quint64 CalibrationController::beginCalculation()
+{
+    return ++m_latestRequestId;
+}
+
+bool CalibrationController::isCurrentCalculation(quint64 revision, quint64 requestId) const
+{
+    return revision == m_dataset.revision && requestId == m_latestRequestId;
+}
+
 void CalibrationController::emitCameraCalibrationChanged()
 {
     emit cameraCalibrationChanged(m_dataset.cameraCalibrationReport);
 }
 
-void CalibrationController::applyResiduals(const ReliabilityReport &report)
+void CalibrationController::applyResiduals(const AxXbReport &report)
 {
     for (PoseSample &sample : m_dataset.samples) {
         for (const SampleResidual &residual : report.sampleResiduals) {
             if (residual.sampleId == sample.id) {
                 sample.rotationResidualDeg = residual.rotationErrorDeg;
                 sample.translationResidualM = residual.translationErrorM;
+                sample.outlier = residual.outlier;
+                break;
+            }
+        }
+    }
+    for (PointSample &sample : m_dataset.pointSamples) {
+        for (const SampleResidual &residual : report.sampleResiduals) {
+            if (residual.sampleId == sample.id) {
+                sample.residualM = residual.translationErrorM;
                 sample.outlier = residual.outlier;
                 break;
             }
@@ -107,8 +259,10 @@ CalibrationResult CalibrationController::recommendedResult() const
 void CalibrationController::newDataset()
 {
     const PoseInputSpec spec = m_dataset.inputSpec;
+    const quint64 nextRevision = m_dataset.revision + 1;
     m_dataset = CalibrationDataset{};
     m_dataset.inputSpec = spec;
+    m_dataset.revision = nextRevision;
     emitDatasetChanged();
     emit reliabilityChanged(CalibrationResult{});
     emitCameraCalibrationChanged();
@@ -117,7 +271,9 @@ void CalibrationController::newDataset()
 
 void CalibrationController::generateDemo()
 {
+    const quint64 nextRevision = m_dataset.revision + 1;
     m_dataset = makeSyntheticDataset();
+    m_dataset.revision = nextRevision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已生成 %1 组带真值的合成数据；方向和数值可由 smoke test 验证。")
                         .arg(m_dataset.samples.size()));
@@ -139,6 +295,7 @@ void CalibrationController::importCameraCalibrationImages(const QStringList &pat
     }
     report.message = QStringLiteral("已选择 %1 张相机标定图片，请开始检测角点。").arg(paths.size());
     m_dataset.cameraCalibrationReport = report;
+    ++m_dataset.revision;
     emitCameraCalibrationChanged();
     emit logMessage(report.message);
 }
@@ -157,6 +314,7 @@ void CalibrationController::detectCameraCalibrationImages()
     }
     m_dataset.cameraCalibrationReport = CameraCalibrationService::detectImages(paths, m_dataset.boardSpec);
     m_dataset.cameraCalibrationReport.outlierThresholdPx = 1.0;
+    ++m_dataset.revision;
     emitCameraCalibrationChanged();
     emit statusChanged(m_dataset.cameraCalibrationReport.message);
     emit logMessage(m_dataset.cameraCalibrationReport.message);
@@ -178,6 +336,7 @@ void CalibrationController::calibrateCameraIntrinsics()
     emit cameraCalibrationStarted();
     const CameraCalibrationOptions options{6, 1.0};
     m_dataset.cameraCalibrationReport = CameraCalibrationService::calibrateImages(paths, m_dataset.boardSpec, options);
+    ++m_dataset.revision;
     emitCameraCalibrationChanged();
     emit statusChanged(m_dataset.cameraCalibrationReport.message);
     emit logMessage(m_dataset.cameraCalibrationReport.message);
@@ -197,8 +356,9 @@ void CalibrationController::applyCameraIntrinsics()
         return;
     }
     m_dataset.cameraIntrinsics = m_dataset.cameraCalibrationReport.intrinsics;
+    ++m_dataset.revision;
     for (PoseSample &sample : m_dataset.samples) {
-        if (sample.imagePath.isEmpty()) continue;
+        if (sample.imagePath.isEmpty() || sample.imageStatus == ImageSampleStatus::ManualPose) continue;
         sample.targetRotation = {};
         sample.targetTranslation = {};
         sample.imageStatus = ImageSampleStatus::NotProcessed;
@@ -206,9 +366,8 @@ void CalibrationController::applyCameraIntrinsics()
         sample.pnpReprojectionRmsePx = 0.0;
         sample.imageMessage = QStringLiteral("相机内参已更新，请重新处理图片。");
     }
-    m_dataset.targetPosesReady = false;
-    m_dataset.results.clear();
-    emitDatasetChanged();
+    clearImageBackedPoses();
+    invalidateComputedState(true, QStringLiteral("相机内参已更新，图片 PnP 位姿需要重新处理。"));
     emit statusChanged(QStringLiteral("相机内参已自动应用，请在采集页重新处理标定板图片。"));
     emit logMessage(QStringLiteral("相机自主标定内参已应用到当前会话。"));
 }
@@ -216,6 +375,7 @@ void CalibrationController::applyCameraIntrinsics()
 void CalibrationController::clearCameraCalibrationImages()
 {
     m_dataset.cameraCalibrationReport = {};
+    ++m_dataset.revision;
     emitCameraCalibrationChanged();
     emit statusChanged(QStringLiteral("已清空相机内参标定图片。"));
 }
@@ -227,6 +387,7 @@ void CalibrationController::importCsv(const QString &path)
         emit error(QStringLiteral("导入失败"), result.error);
         return;
     }
+    ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已导入训练 CSV：%1，已标准化为 rad/m").arg(path));
 }
@@ -238,6 +399,7 @@ void CalibrationController::importPoseImageCsv(const QString &path)
         emit error(QStringLiteral("导入失败"), result.error);
         return;
     }
+    ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已导入机器人位姿 + 标定板图片配对 CSV：%1").arg(path));
 }
@@ -249,6 +411,7 @@ void CalibrationController::importRobotPoseCsv(const QString &path)
         emit error(QStringLiteral("导入失败"), result.error);
         return;
     }
+    ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已导入 %1 组机器人位姿，请继续上传同顺序的标定板图片。")
                         .arg(m_dataset.samples.size()));
@@ -276,6 +439,7 @@ void CalibrationController::importCalibrationImages(const QStringList &paths)
     }
     m_dataset.targetPosesReady = false;
     m_dataset.results.clear();
+    ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已上传 %1 张标定板图片，请确认其顺序与机器人坐标一致。")
                         .arg(paths.size()));
@@ -334,6 +498,7 @@ bool CalibrationController::processBoardImages()
     }
     m_dataset.results.clear();
     m_dataset.targetPosesReady = succeeded == processed && processed == m_dataset.samples.size();
+    ++m_dataset.revision;
     emitDatasetChanged();
     emit imageProcessingFinished(processed, succeeded);
     emit logMessage(QStringLiteral("标定板图片处理完成：%1/%2 成功。").arg(succeeded).arg(processed));
@@ -357,17 +522,22 @@ void CalibrationController::importValidationCsv(const QString &path)
     }
     m_dataset.validationSamples = validationData.samples;
     m_dataset.results.clear();
+    ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已导入独立验证 CSV：%1").arg(path));
 }
 
 void CalibrationController::importJson(const QString &path)
 {
-    const IoResult result = readJson(path, &m_dataset);
+    const quint64 nextRevision = m_dataset.revision + 1;
+    CalibrationDataset imported;
+    const IoResult result = readJson(path, &imported);
     if (!result.success) {
         emit error(QStringLiteral("导入失败"), result.error);
         return;
     }
+    m_dataset = imported;
+    m_dataset.revision = nextRevision;
     emit inputSpecChanged(m_dataset.robotName, m_dataset.cameraName);
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已导入 JSON：%1").arg(path));
@@ -424,6 +594,7 @@ void CalibrationController::deleteSamples(const QVector<int> &ids)
             if (!ids.contains(sample.id)) kept.append(sample);
         m_dataset.pointSamples = kept;
         m_dataset.results.clear();
+        ++m_dataset.revision;
         emitDatasetChanged();
         emit logMessage(QStringLiteral("已删除 %1 组点基样本，结果已清空。").arg(ids.size()));
         return;
@@ -434,6 +605,7 @@ void CalibrationController::deleteSamples(const QVector<int> &ids)
     m_dataset.samples = kept;
     m_dataset.results.clear();
     m_dataset.hasGroundTruth = false;
+    ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已删除 %1 组样本，结果已清空。合成真值标记已失效。").arg(ids.size()));
 }
@@ -523,7 +695,7 @@ bool CalibrationController::applyManualPoseInputs(const QVector<ManualPoseInput>
     }
 
     CalibrationDataset candidate = m_dataset;
-    candidate.mode = CalibrationMode::EyeInHand;
+    candidate.mode = m_dataset.mode;
     candidate.inputMode = CalibrationInputMode::PosePairs;
     candidate.inputSpec = spec;
     candidate.inputSpec.direction = PoseDirection::GripperToBase;
@@ -539,12 +711,13 @@ bool CalibrationController::applyManualPoseInputs(const QVector<ManualPoseInput>
     }
 
     m_dataset.inputSpec = candidate.inputSpec;
-    m_dataset.mode = CalibrationMode::EyeInHand;
+    m_dataset.mode = candidate.mode;
     m_dataset.inputMode = CalibrationInputMode::PosePairs;
     m_dataset.samples = samples;
     m_dataset.pointSamples.clear();
     m_dataset.targetPosesReady = true;
     m_dataset.results.clear();
+    ++m_dataset.revision;
     m_dataset.hasGroundTruth = false;
     emitDatasetChanged();
     emit reliabilityChanged(CalibrationResult{});
@@ -619,7 +792,7 @@ bool CalibrationController::applyManualPointInputs(const QVector<PointSample> &i
         return false;
     }
 
-    m_dataset.mode = CalibrationMode::EyeInHand;
+    // Keep the mode selected on the parameters page; point data is valid for both modes.
     m_dataset.inputMode = CalibrationInputMode::FixedPoint3D;
     m_dataset.inputSpec = spec;
     m_dataset.inputSpec.direction = PoseDirection::GripperToBase;
@@ -627,6 +800,7 @@ bool CalibrationController::applyManualPointInputs(const QVector<PointSample> &i
     m_dataset.samples.clear();
     m_dataset.targetPosesReady = false;
     m_dataset.results.clear();
+    ++m_dataset.revision;
     m_dataset.hasGroundTruth = false;
     emitDatasetChanged();
     emit reliabilityChanged(CalibrationResult{});
@@ -640,7 +814,7 @@ bool CalibrationController::applyManualPointInputs(const QVector<PointSample> &i
 FixedTargetPoseReport CalibrationController::computeFixedTargetPose(const CalibrationResult &result,
                                                                      int referenceSampleId)
 {
-    if (m_dataset.inputMode != CalibrationInputMode::PosePairs || !result.success) {
+    if (m_dataset.mode == CalibrationMode::EyeToHand || m_dataset.inputMode != CalibrationInputMode::PosePairs || !result.success) {
         FixedTargetPoseReport report;
         report.errors << QStringLiteral("当前需要成功的 PosePairs 结果才能计算 fixed target pose。");
         return report;
@@ -664,7 +838,12 @@ CalibrationResult CalibrationController::optimizeRecommendedResult()
 {
     CalibrationResult optimized;
     const CalibrationResult seed = recommendedResult();
-    if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+    if (m_dataset.mode == CalibrationMode::EyeToHand) {
+        if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D)
+            optimized = EyeToHandCalibrationService::calibrate(m_dataset, CalibrationMethod::Nonlinear);
+        else
+            optimized = EyeToHandCalibrationService::calibrate(m_dataset, CalibrationMethod::Nonlinear);
+    } else if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
         optimized = PointCalibrationService::calibrate(m_dataset);
     } else {
         if (!seed.success) {
@@ -689,7 +868,7 @@ CalibrationResult CalibrationController::optimizeRecommendedResult()
     if (optimized.method == CalibrationMethod::PointBased && optimized.success) {
         m_dataset.results = {optimized};
     }
-    if (optimized.success) applyResiduals(optimized.trainingReport);
+    if (optimized.success) applyResiduals(optimized.axXbReport);
     emitDatasetChanged();
     emit reliabilityChanged(optimized);
     emit matrixChanged(optimized);
@@ -706,7 +885,6 @@ PoseQualityReport CalibrationController::evaluatePoseQuality() const
 
 void CalibrationController::calculateSelected(CalibrationMethod method)
 {
-    m_dataset.mode = CalibrationMode::EyeInHand;
     if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
         if (m_dataset.pointSamples.size() < 5) {
             emit error(QStringLiteral("无法计算"), QStringLiteral("FixedPoint3D 至少需要 5 组点基样本。"));
@@ -714,9 +892,18 @@ void CalibrationController::calculateSelected(CalibrationMethod method)
         }
         emit calculationStarted();
         const CalibrationDataset dataset = m_dataset;
+        const quint64 revision = m_dataset.revision;
+        const quint64 requestId = beginCalculation();
         auto *watcher = new QFutureWatcher<CalibrationResult>(this);
-        connect(watcher, &QFutureWatcher<CalibrationResult>::finished, this, [this, watcher]() {
+        connect(watcher, &QFutureWatcher<CalibrationResult>::finished, this,
+                [this, watcher, revision, requestId]() {
             const CalibrationResult result = watcher->result();
+            if (!isCurrentCalculation(revision, requestId)) {
+                emit logMessage(QStringLiteral("计算结果已丢弃：数据或参数在计算期间发生变化。"));
+                emit calculationFinished();
+                watcher->deleteLater();
+                return;
+            }
             m_dataset.results = result.success ? QVector<CalibrationResult>{result} : QVector<CalibrationResult>{};
             if (result.success) emit reliabilityChanged(result);
             emitDatasetChanged();
@@ -725,10 +912,11 @@ void CalibrationController::calculateSelected(CalibrationMethod method)
             emit calculationFinished();
             watcher->deleteLater();
         });
-        watcher->setFuture(QtConcurrent::run([dataset]() {
-            return PointCalibrationService::calibrate(dataset);
+        watcher->setFuture(QtConcurrent::run([dataset, method]() {
+            return dataset.mode == CalibrationMode::EyeToHand
+                       ? EyeToHandCalibrationService::calibrate(dataset, method)
+                       : PointCalibrationService::calibrate(dataset);
         }));
-        Q_UNUSED(method)
         return;
     }
     if (!ensureTargetPosesReady()) return;
@@ -741,11 +929,20 @@ void CalibrationController::calculateSelected(CalibrationMethod method)
     emit calculationStarted();
 
     const CalibrationDataset dataset = m_dataset;
+    const quint64 revision = m_dataset.revision;
+    const quint64 requestId = beginCalculation();
     auto *watcher = new QFutureWatcher<CalibrationResult>(this);
-    connect(watcher, &QFutureWatcher<CalibrationResult>::finished, this, [this, watcher, method]() {
+    connect(watcher, &QFutureWatcher<CalibrationResult>::finished, this,
+            [this, watcher, method, revision, requestId]() {
         const CalibrationResult result = watcher->result();
+        if (!isCurrentCalculation(revision, requestId)) {
+            emit logMessage(QStringLiteral("计算结果已丢弃：数据或参数在计算期间发生变化。"));
+            emit calculationFinished();
+            watcher->deleteLater();
+            return;
+        }
         m_dataset.results = {result};
-        applyResiduals(result.trainingReport);
+        applyResiduals(result.axXbReport);
         emitDatasetChanged();
         emit reliabilityChanged(result);
         emit matrixChanged(result);
@@ -755,7 +952,9 @@ void CalibrationController::calculateSelected(CalibrationMethod method)
         watcher->deleteLater();
     });
     watcher->setFuture(QtConcurrent::run([dataset, method]() {
-        return CalibrationService::calibrate(dataset, method);
+        return dataset.mode == CalibrationMode::EyeToHand
+                   ? EyeToHandCalibrationService::calibrate(dataset, method)
+                   : CalibrationService::calibrate(dataset, method);
     }));
 }
 
@@ -765,7 +964,6 @@ void CalibrationController::calculateAll()
         calculateSelected(CalibrationMethod::PointBased);
         return;
     }
-    m_dataset.mode = CalibrationMode::EyeInHand;
     if (!ensureTargetPosesReady()) return;
     const ValidationReport validation = validateDataset(m_dataset);
     if (!validation.valid) {
@@ -776,11 +974,20 @@ void CalibrationController::calculateAll()
     emit calculationStarted();
 
     const CalibrationDataset dataset = m_dataset;
+    const quint64 revision = m_dataset.revision;
+    const quint64 requestId = beginCalculation();
     auto *watcher = new QFutureWatcher<QVector<CalibrationResult>>(this);
-    connect(watcher, &QFutureWatcher<QVector<CalibrationResult>>::finished, this, [this, watcher]() {
+    connect(watcher, &QFutureWatcher<QVector<CalibrationResult>>::finished, this,
+            [this, watcher, revision, requestId]() {
+        if (!isCurrentCalculation(revision, requestId)) {
+            emit logMessage(QStringLiteral("五算法结果已丢弃：数据或参数在计算期间发生变化。"));
+            emit calculationFinished();
+            watcher->deleteLater();
+            return;
+        }
         m_dataset.results = watcher->result();
         if (!m_dataset.results.isEmpty())
-            applyResiduals(recommendedResult().trainingReport);
+            applyResiduals(recommendedResult().axXbReport);
         emitDatasetChanged();
 
         int recommendedRow = -1;
@@ -788,9 +995,9 @@ void CalibrationController::calculateAll()
             const CalibrationResult &result = m_dataset.results.at(index);
             emit logMessage(QStringLiteral("%1：%2，RMSE %3° / %4 m，%5")
                                 .arg(methodName(result.method), result.message)
-                                .arg(result.trainingReport.rotationRmseDeg, 0, 'f', 5)
-                                .arg(result.trainingReport.translationRmseM, 0, 'f', 7)
-                                .arg(result.trainingReport.passed ? QStringLiteral("通过")
+                                .arg(result.axXbReport.rotationRmseDeg, 0, 'f', 5)
+                                .arg(result.axXbReport.translationRmseM, 0, 'f', 7)
+                                .arg(result.axXbReport.passed ? QStringLiteral("通过")
                                                                   : QStringLiteral("未通过")));
             if (result.recommended) recommendedRow = index;
         }
@@ -802,7 +1009,9 @@ void CalibrationController::calculateAll()
         watcher->deleteLater();
     });
     watcher->setFuture(QtConcurrent::run([dataset]() {
-        return CalibrationService::calibrateAll(dataset);
+        return dataset.mode == CalibrationMode::EyeToHand
+                   ? EyeToHandCalibrationService::calibrateAll(dataset)
+                   : CalibrationService::calibrateAll(dataset);
     }));
 }
 
@@ -819,16 +1028,25 @@ void CalibrationController::runReliabilityPipeline(int bootstrapResamples,
 
     emit reliabilityPipelineStarted();
     const CalibrationDataset dataset = m_dataset;
+    const quint64 revision = m_dataset.revision;
+    const quint64 requestId = beginCalculation();
     auto *watcher = new QFutureWatcher<ReliabilityPipelineExecution>(this);
     connect(watcher, &QFutureWatcher<ReliabilityPipelineExecution>::finished, this,
-            [this, watcher]() {
+            [this, watcher, revision, requestId]() {
                 const ReliabilityPipelineExecution execution = watcher->result();
+                if (!isCurrentCalculation(revision, requestId)) {
+                    emit logMessage(QStringLiteral("可靠性流水线结果已丢弃：数据或参数在计算期间发生变化。"));
+                    emit reliabilityPipelineFinished();
+                    watcher->deleteLater();
+                    return;
+                }
                 m_dataset = execution.refinedDataset;
+                m_dataset.revision = revision;
                 m_dataset.reliabilityPipelineReport = execution.report;
                 emitDatasetChanged();
                 emit reliabilityPipelineChanged(execution.report);
                 if (execution.finalResult.success) {
-                    applyResiduals(execution.finalResult.trainingReport);
+                    applyResiduals(execution.finalResult.axXbReport);
                     emit reliabilityChanged(execution.finalResult);
                     emit matrixChanged(execution.finalResult);
                 }

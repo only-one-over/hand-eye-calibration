@@ -2,6 +2,7 @@
 
 #include <QFont>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -39,6 +40,11 @@ CapturePage::CapturePage(QWidget *parent) : QWidget(parent)
     connect(imageButton, &QPushButton::clicked, this, &CapturePage::uploadImagesRequested);
     layout->addWidget(uploadGroup);
 
+    auto *generateBoardButton = new QPushButton(QStringLiteral("生成当前参数的标定板 PDF"), this);
+    generateBoardButton->setObjectName(QStringLiteral("captureGenerateBoardPdfButton"));
+    layout->addWidget(generateBoardButton);
+    connect(generateBoardButton, &QPushButton::clicked, this, &CapturePage::generateBoardRequested);
+
     auto *statusGroup = new QGroupBox(QStringLiteral("采集进度"), this);
     auto *statusLayout = new QVBoxLayout(statusGroup);
     m_summary = new QLabel(QStringLiteral("机器人坐标：0 组 | 标定图片：0 张 | target→camera：0 组"), statusGroup);
@@ -55,12 +61,17 @@ CapturePage::CapturePage(QWidget *parent) : QWidget(parent)
     layout->addWidget(processButton);
     connect(processButton, &QPushButton::clicked, this, &CapturePage::processRequested);
 
-    auto *viewDataButton = new QPushButton(QStringLiteral("查看当前数据"), this);
-    auto *viewResultsButton = new QPushButton(QStringLiteral("进入标定结果"), this);
-    layout->addWidget(viewDataButton);
-    layout->addWidget(viewResultsButton);
-    connect(viewDataButton, &QPushButton::clicked, this, &CapturePage::viewDataRequested);
-    connect(viewResultsButton, &QPushButton::clicked, this, &CapturePage::viewResultsRequested);
+    auto *flowBar = new QHBoxLayout;
+    auto *flowHint = new QLabel(QStringLiteral("上传完成后点击下一步。若使用图片数据，程序会在进入数据页前尝试处理棋盘格。"), this);
+    flowHint->setWordWrap(true);
+    flowHint->setStyleSheet(QStringLiteral("color: #667085;"));
+    flowBar->addWidget(flowHint, 1);
+    auto *nextButton = new QPushButton(QStringLiteral("下一步：查看当前数据"), this);
+    nextButton->setObjectName(QStringLiteral("captureNextButton"));
+    nextButton->setProperty("variant", "primary");
+    flowBar->addWidget(nextButton);
+    layout->addLayout(flowBar);
+    connect(nextButton, &QPushButton::clicked, this, &CapturePage::nextRequested);
     layout->addStretch();
 }
 

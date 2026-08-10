@@ -17,10 +17,21 @@ using Vector3 = std::array<double, 3>;
 using Vector4 = std::array<double, 4>;
 using Vector5 = std::array<double, 5>;
 
-enum class CalibrationMethod { Tsai, Park, Horaud, Andreff, Daniilidis, PointBased, Nonlinear };
+enum class CalibrationMethod {
+    Tsai,
+    Park,
+    Horaud,
+    Andreff,
+    Daniilidis,
+    PointBased,
+    Nonlinear,
+    RobotWorldShah,
+    RobotWorldLi
+};
 enum class CalibrationMode { EyeInHand, EyeToHand };
 enum class CalibrationInputMode { PosePairs, FixedPoint3D };
 enum class RotationFormat { Rodrigues, EulerXYZ, RPY, QuaternionWXYZ };
+enum class PoseConvention { Generic, EulerXYZIntrinsic, RpyZyx, KukaAbcZyx, FanucWprXyz };
 enum class AngleUnit { Radians, Degrees };
 enum class LengthUnit { Meters, Millimeters };
 enum class PoseDirection { GripperToBase, TargetToCamera, CameraToGripper };
@@ -41,6 +52,7 @@ enum class CameraCalibrationSampleStatus { NotProcessed, DetectionFailed, Valid,
 
 struct PoseInputSpec {
     RotationFormat rotationFormat = RotationFormat::Rodrigues;
+    PoseConvention convention = PoseConvention::Generic;
     AngleUnit angleUnit = AngleUnit::Radians;
     LengthUnit lengthUnit = LengthUnit::Meters;
     PoseAdapterKind adapter = PoseAdapterKind::Generic;
@@ -88,6 +100,21 @@ struct BoardSpec {
     int markerCountX = 5;
     int markerCountY = 7;
     double markerSizeM = 0.01875;
+    double markerSeparationM = 0.005;
+};
+
+struct BoardPdfReport {
+    bool success = false;
+    bool reused = false;
+    QString outputPath;
+    QString pattern;
+    QString outputMode;
+    int pageCount = 0;
+    double widthMm = 0.0;
+    double heightMm = 0.0;
+    QStringList warnings;
+    QString error;
+    QDateTime generatedAt;
 };
 
 struct CameraIntrinsics {
@@ -139,7 +166,7 @@ struct CameraCalibrationReport {
     QVector<CameraCalibrationSample> samples;
 };
 
-struct ReliabilityReport {
+struct AxXbReport {
     bool available = false;
     bool valid = false;
     bool passed = false;
@@ -155,6 +182,8 @@ struct ReliabilityReport {
     QStringList warnings;
     QVector<SampleResidual> sampleResiduals;
 };
+
+using ReliabilityReport = AxXbReport;
 
 struct FixedTargetPoseSample {
     int sampleId = 0;
@@ -207,6 +236,44 @@ struct FixedPointReport {
     QVector<FixedPointSample> samples;
 };
 
+struct EyeToHandPoseResidual {
+    int sampleId = 0;
+    double rotationErrorDeg = 0.0;
+    double translationErrorM = 0.0;
+    bool outlier = false;
+};
+
+struct EyeToHandPoseReport {
+    bool available = false;
+    bool success = false;
+    Matrix4 cameraToBase{};
+    Matrix4 targetToGripper{};
+    double rotationRmseDeg = 0.0;
+    double translationRmseM = 0.0;
+    double rotationMeanDeg = 0.0;
+    double translationMeanM = 0.0;
+    double rotationMaxDeg = 0.0;
+    double translationMaxM = 0.0;
+    int outlierCount = 0;
+    QVector<EyeToHandPoseResidual> samples;
+    QStringList errors;
+    QStringList warnings;
+};
+
+struct EyeToHandPointReport {
+    bool available = false;
+    bool success = false;
+    Matrix4 cameraToBase{};
+    Vector3 pointInGripper{};
+    double rmseM = 0.0;
+    double meanErrorM = 0.0;
+    double maxErrorM = 0.0;
+    int outlierCount = 0;
+    QVector<FixedPointSample> samples;
+    QStringList errors;
+    QStringList warnings;
+};
+
 struct PoseQualityReport {
     bool available = false;
     bool calculable = false;
@@ -234,6 +301,9 @@ struct NonlinearOptimizationReport {
     double beforeTranslationRmseM = 0.0;
     double afterRotationRmseDeg = 0.0;
     double afterTranslationRmseM = 0.0;
+    double normalizedHuberLossBefore = 0.0;
+    double normalizedHuberLossAfter = 0.0;
+    double normalizedHuberDelta = 1.0;
     QString message;
 };
 
@@ -254,6 +324,10 @@ struct BootstrapReport {
     bool success = false;
     int requestedResamples = 0;
     int successfulResamples = 0;
+    int rawSuccessfulResamples = 0;
+    int nonlinearSuccessfulResamples = 0;
+    int invalidResamples = 0;
+    CalibrationMethod baseMethod = CalibrationMethod::Tsai;
     double confidenceLevel = 0.95;
     Vector3 rotationStdDeg{};
     Vector3 translationStdM{};
@@ -263,8 +337,16 @@ struct BootstrapReport {
     Vector3 translationUpperM{};
     double rotationNormStdDeg = 0.0;
     double translationNormStdM = 0.0;
-    double confidenceScore = 0.0;
+    double successRate = 0.0;
     QStringList warnings;
+    QString message;
+};
+
+struct OutlierValidationStep {
+    int sampleId = 0;
+    double beforeLoss = 0.0;
+    double afterLoss = 0.0;
+    bool accepted = false;
     QString message;
 };
 
@@ -282,9 +364,12 @@ struct ReliabilityPipelineReport {
     int finalSampleCount = 0;
     int autoRemovedCount = 0;
     QVector<int> removedSampleIds;
+    QVector<int> candidateSampleIds;
+    QVector<int> retainedOutlierIds;
+    QVector<OutlierValidationStep> outlierValidation;
     QVector<PipelineStageReport> stages;
     PnpQualityReport pnpReport;
-    ReliabilityReport axXbReport;
+    AxXbReport axXbReport;
     FixedTargetPoseReport fixedTargetReport;
     FixedPointReport fixedPointReport;
     PoseQualityReport qualityReport;
@@ -292,6 +377,11 @@ struct ReliabilityPipelineReport {
     BootstrapReport bootstrapReport;
     CalibrationMethod finalMethod = CalibrationMethod::Tsai;
     Matrix4 finalCameraToGripper{};
+    Matrix4 finalCameraToBase{};
+    Matrix4 finalTargetToGripper{};
+    Vector3 finalPointInGripper{};
+    EyeToHandPoseReport eyeToHandPoseReport;
+    EyeToHandPointReport eyeToHandPointReport;
     QStringList errors;
     QStringList warnings;
     QString message;
@@ -327,20 +417,29 @@ struct PoseSample {
 
 struct CalibrationResult {
     CalibrationMethod method = CalibrationMethod::Tsai;
+    CalibrationMethod seedMethod = CalibrationMethod::Tsai;
     bool success = false;
     bool recommended = false;
     Matrix4 cameraToGripper{};
+    // Eye-To-Hand only: camera is fixed in the external/base frame.
+    Matrix4 cameraToBase{};
+    Matrix4 targetToGripper{};
+    Vector3 pointInGripper{};
     double rotationErrorDeg = 0.0;
     double translationError = 0.0;
     qint64 elapsedMs = 0;
     QString message;
-    ReliabilityReport trainingReport;
-    ReliabilityReport validationReport;
+    AxXbReport axXbReport;
+    // Legacy mirror kept for source compatibility with older integrations.
+    AxXbReport trainingReport;
+    AxXbReport validationReport;
     FixedTargetPoseReport fixedTargetReport;
     FixedPointReport fixedPointReport;
     PoseQualityReport qualityReport;
     NonlinearOptimizationReport optimizationReport;
     BootstrapReport bootstrapReport;
+    EyeToHandPoseReport eyeToHandPoseReport;
+    EyeToHandPointReport eyeToHandPointReport;
 };
 
 struct CalibrationDataset {
@@ -363,9 +462,11 @@ struct CalibrationDataset {
     Matrix4 groundTruthCameraToGripper{};
     QVector<CalibrationResult> results;
     ReliabilityPipelineReport reliabilityPipelineReport;
+    BoardPdfReport lastBoardPdfReport;
     int bootstrapResamples = 200;
     double bootstrapConfidence = 0.95;
     QDateTime createdAt = QDateTime::currentDateTime();
+    quint64 revision = 0;
 };
 
 inline QString methodName(CalibrationMethod method)
@@ -378,6 +479,8 @@ inline QString methodName(CalibrationMethod method)
     case CalibrationMethod::Daniilidis: return QStringLiteral("Daniilidis");
     case CalibrationMethod::PointBased: return QStringLiteral("FixedPoint3D 点基");
     case CalibrationMethod::Nonlinear: return QStringLiteral("非线性精修");
+    case CalibrationMethod::RobotWorldShah: return QStringLiteral("Robot-World Shah");
+    case CalibrationMethod::RobotWorldLi: return QStringLiteral("Robot-World Li");
     }
     return QStringLiteral("Unknown");
 }
@@ -517,6 +620,12 @@ inline QVector<CalibrationMethod> allMethods()
 {
     return {CalibrationMethod::Tsai, CalibrationMethod::Park, CalibrationMethod::Horaud,
             CalibrationMethod::Andreff, CalibrationMethod::Daniilidis};
+}
+
+inline QVector<CalibrationMethod> eyeToHandPoseMethods()
+{
+    return {CalibrationMethod::RobotWorldShah, CalibrationMethod::RobotWorldLi,
+            CalibrationMethod::Nonlinear};
 }
 
 } // namespace handeye

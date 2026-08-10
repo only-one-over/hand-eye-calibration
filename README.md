@@ -8,8 +8,8 @@
 - 自动计算全部算法，并按可靠性报告推荐结果。
 - 输入姿态格式：Rodrigues、Euler XYZ、RPY、Quaternion（WXYZ）。
 - 角度单位：degree/rad；长度单位：mm/m，导入时统一转换为内部的 rad/m。
-- 明确记录并展示方向：`gripper → base`、`target → camera`、输出 `camera → gripper`。
-- Eye-To-Hand 当前在界面中禁用，避免使用尚未完成的流程。
+- 明确记录并展示方向：机器人 `gripper → base`、相机 `target → camera`。
+- 已启用 Eye-To-Hand：PosePairs 输出 `camera → base` 和 `target → gripper`；FixedPoint3D 输出 `camera → base` 和 TCP 上特征点坐标。
 - 相对运动退化检测：样本数量、重复样本、旋转激励、旋转轴分布和有限值检查。
 - 真实 RMSE、平均误差、最大误差、单样本残差和异常样本标记。
 - 支持独立验证数据集，并输出是否通过验证。
@@ -17,7 +17,8 @@
 - 机器人 Pose Adapter：Generic、Universal Robots、KUKA、FANUC。
 - 自主相机内参标定：多选棋盘格图片，自动计算普通针孔模型、5 个畸变参数和重投影误差。
 - 相机标定质量检查：至少 6 张有效图片、统一分辨率、单图 RMSE 异常剔除和覆盖性提示。
-- 手动 TCP/相机位姿标定：逐组输入 `gripper → base` 和 `target → camera`，无需图片或 PnP 即可复用五种手眼算法。
+- 手动输入支持两种模式：PosePairs 逐组输入 `gripper → base` 与 `target → camera`；FixedPoint3D 输入 TCP 6D 与相机 XYZ，不需要相机旋转。
+- Eye-To-Hand PosePairs 使用 OpenCV Robot-World Shah、Li 和非线性精修；点基模式要求特征点刚性安装在 TCP 上，不能使用工作台固定点。
 - 矩阵导出：JSON、YAML、TXT、C++、Python；JSON 同时保存机器人、相机、单位、算法、日期和误差信息。
 
 ## 构建
@@ -72,18 +73,18 @@ id,image_path,tx,ty,tz,qw,qx,qy,qz
 
 ## Qt 界面流程
 
-主窗口使用顶部分页：`首页 | 采集 | 参数 | 相机内参 | 手动输入 | 当前数据 | 标定结果`。
+主窗口使用顶部分页：`首页 | 采集 | 参数 | 相机内参 | 手动输入 | 标定板 PDF | 当前数据 | 标定结果`。
 
 手眼标定流程：
 
-1. 选择 Eye-In-Hand、姿态格式、单位、Pose Adapter、机器人和相机信息。
+1. 在“参数”页选择 Eye-In-Hand 或 Eye-To-Hand，并选择 PosePairs / FixedPoint3D、姿态格式、单位、Pose Adapter、机器人和相机信息。
 2. 点击“上传机器人坐标”，导入本轮机器人位姿 CSV。
 3. 点击“上传标定板图片”，按机器人坐标顺序多选图片。
 4. 两次上传都会提醒用户确认数量、编号和顺序一致。
 5. 如果没有相机内参，先进入“相机内参”分页完成自主标定。
-6. 点击“处理标定板图片并生成相机位姿”，再选择算法或运行五种算法推荐。
+6. 点击“处理标定板图片并生成相机位姿”，再选择当前模式对应的算法并运行推荐计算。
 
-如果用户已经从机器人控制器和视觉系统获得成对位姿，可以直接进入“手动输入”分页。TCP 输入方向固定为 `gripper → base`，相机输入方向固定为 `target → camera`；旋转格式、角度单位和长度单位跟随“参数”页，应用时统一转换为 Rodrigues 弧度和米。手动数据会替换当前训练样本，校验通过后可直接执行五种算法。
+如果用户已经从机器人控制器和视觉系统获得数据，可以直接进入“手动输入”分页。PosePairs 中 TCP 输入方向固定为 `gripper → base`，相机输入方向固定为 `target → camera`；FixedPoint3D 中相机只输入 XYZ。旋转格式、角度单位和长度单位跟随“参数”页，应用时统一转换为 Rodrigues 弧度和米。手动数据会替换当前训练样本，校验通过后按当前模式执行算法。
 
 “当前数据”分页逐组显示机器人坐标、图片路径、标定板计算出的或手动输入的 `target→camera` 坐标、检测状态、角点数量和 PnP RMSE；“相机内参”分页显示角点预览、单图误差和标定报告。
 
@@ -97,11 +98,27 @@ id, gripper_tx, gripper_ty, gripper_tz, gripper_r1, gripper_r2, gripper_r3, targ
 
 旋转列数量为 3 时表示 Rodrigues、Euler XYZ 或 RPY；Quaternion 模式使用 4 个旋转值。导入前在界面选择姿态格式、角度单位、长度单位和 Pose Adapter。
 
-内部统一采用：
+Eye-In-Hand 内部统一采用：
 
 ```text
 gripper_to_base + target_to_camera → camera_to_gripper
 ```
+
+Eye-To-Hand 使用不同的方程，不能直接套用上面的输出方向：
+
+```text
+Aᵢ = T_base_gripper(i), Bᵢ = T_camera_target(i)
+Aᵢ × T_gripper_target = T_base_camera × Bᵢ
+输出：camera_to_base、target_to_gripper
+```
+
+点基 Eye-To-Hand 使用：
+
+```text
+T_base_gripper(i) × p_gripper = T_base_camera × p_camera(i)
+```
+
+这里的 `p_gripper` 是特征点在 TCP 坐标系中的固定位置。每组 `p_camera` 必须是同一个随 TCP 运动的物理点。
 
 ## 冒烟测试
 
@@ -133,3 +150,37 @@ docs/plans/   功能设计与实施计划
 结果页提供 fixed target pose、每个 sample 到鲁棒均值或指定 reference 的误差、Huber 非线性精修、优化前后 RMSE，以及由样本数量、旋转幅度、旋转轴和空间分布组成的 Pose Quality Score。
 
 标定板支持 Chessboard（`findChessboardCornersSB` 优先、Classic 回退）、ChArUco 和 ArUco Grid。平面 PnP 会比较 `SOLVEPNP_ITERATIVE` 与 `SOLVEPNP_IPPE`，并保存检测器、PnP 方法和误差摘要。
+## Reliability pipeline
+
+The reliability run is ordered as:
+
+`motion excitation -> PnP quality -> five algorithms -> AX=XB -> Fixed Target -> single-sample outlier verification -> normalized Huber -> bootstrap`.
+
+All pose values are normalized internally to Rodrigues radians and meters. Eye-In-Hand exports ``camera->gripper``; Eye-To-Hand exports ``camera->base`` and the corresponding TCP target or point result.
+
+Normalized Huber uses a 1 degree rotation scale and a 1 mm translation scale. Bootstrap reports ``successRate`` in ``[0,1]``, while ``confidenceLevel`` controls the uncertainty interval. The result metadata keeps the AX=XB report separate from the Fixed Target report.
+
+Run the local checks after configuring the project:
+
+```powershell
+cmake --build build --config Debug
+ctest --test-dir build -C Debug --output-on-failure
+```
+
+## Calibration board PDF and fixed documents
+
+The Board PDF page generates the current board from `BoardSpec` without changing the
+calibration mathematics. Chessboard, ChArUco and ArUco Grid are supported. The custom-size
+PDF keeps the board physical size; the A4 version uses 1:1 tiled pages. Print at 100% and
+verify the included 100 mm scale line with a ruler.
+
+Built-in PDF instructions are bundled as Qt resources. Files with the same names in the
+application `docs/` directory take precedence, so site-specific instructions can be replaced
+without recompiling the program. The Help menu and Board PDF page can open the documents.
+
+Generated board PDFs are saved by default to the user documents directory:
+`HandEyeCalibration/board_pdfs`. The directory is created on first use. The generated filename
+contains the board type, current dimensions, output mode and timestamp; existing files are never
+overwritten. If a PDF with the same board specification and output mode already exists, the
+Generate button reuses the newest matching file instead of rendering it again. Use the separate
+Board PDF page's `另存` buttons when a different output location is needed.

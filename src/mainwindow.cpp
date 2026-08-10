@@ -1,7 +1,12 @@
 #include "mainwindow.h"
 
+#include "core/board_pdf_generator.h"
+#include "core/board_pdf_storage.h"
+#include "core/document_service.h"
+
 #include "controllers/calibration_controller.h"
 #include "views/camera_calibration_page.h"
+#include "views/board_pdf_page.h"
 #include "views/calibration_result_page.h"
 #include "views/capture_page.h"
 #include "views/current_data_page.h"
@@ -12,11 +17,15 @@
 #include <QAction>
 #include <QApplication>
 #include <QDateTime>
+#include <QDesktopServices>
+#include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QUrl>
 
 #include <algorithm>
 
@@ -39,6 +48,7 @@ void MainWindow::buildPages()
     m_homePage = new HomePage(m_tabs);
     m_capturePage = new CapturePage(m_tabs);
     m_parametersPage = new ParametersPage(m_tabs);
+    m_boardPdfPage = new BoardPdfPage(m_tabs);
     m_cameraCalibrationPage = new CameraCalibrationPage(m_tabs);
     m_manualPosePage = new ManualPosePage(m_tabs);
     m_currentDataPage = new CurrentDataPage(m_tabs);
@@ -48,6 +58,7 @@ void MainWindow::buildPages()
     m_tabs->addTab(m_parametersPage, QStringLiteral("参数"));
     m_tabs->addTab(m_cameraCalibrationPage, QStringLiteral("相机内参"));
     m_tabs->addTab(m_manualPosePage, QStringLiteral("手动输入"));
+    m_tabs->addTab(m_boardPdfPage, QStringLiteral("标定板 PDF"));
     m_tabs->addTab(m_currentDataPage, QStringLiteral("当前数据"));
     m_tabs->addTab(m_resultPage, QStringLiteral("标定结果"));
     setCentralWidget(m_tabs);
@@ -67,12 +78,28 @@ void MainWindow::buildMenuBar()
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("生成合成示例数据"), this, &MainWindow::onGenerateDemo);
 
+    auto *toolsMenu = menuBar()->addMenu(QStringLiteral("工具"));
+    toolsMenu->addAction(QStringLiteral("生成 1:1 单页标定板 PDF"), this,
+                         [this] { navigateToPage(BoardPdfPageIndex); });
+    toolsMenu->addAction(QStringLiteral("生成 A4 分块标定板 PDF"), this,
+                         [this] { navigateToPage(BoardPdfPageIndex); });
+
     auto *viewMenu = menuBar()->addMenu(QStringLiteral("查看"));
     viewMenu->addAction(QStringLiteral("首页"), this, [this] { navigateToPage(HomePageIndex); });
     viewMenu->addAction(QStringLiteral("相机内参"), this, [this] { navigateToPage(CameraCalibrationPageIndex); });
     viewMenu->addAction(QStringLiteral("手动输入"), this, [this] { navigateToPage(ManualPosePageIndex); });
+    viewMenu->addAction(QStringLiteral("标定板 PDF"), this, [this] { navigateToPage(BoardPdfPageIndex); });
     viewMenu->addAction(QStringLiteral("当前数据"), this, [this] { navigateToPage(CurrentDataPageIndex); });
     viewMenu->addAction(QStringLiteral("标定结果"), this, [this] { navigateToPage(ResultPageIndex); });
+
+    auto *helpMenu = menuBar()->addMenu(QStringLiteral("帮助"));
+    for (const DocumentInfo &document : DocumentService::listDocuments()) {
+        helpMenu->addAction(document.title, this, [this, fileName = document.fileName] {
+            onOpenDocument(fileName);
+        });
+    }
+    helpMenu->addSeparator();
+    helpMenu->addAction(QStringLiteral("打开说明文档目录"), this, &MainWindow::onOpenDocumentsDirectory);
 
     auto *exportMenu = menuBar()->addMenu(QStringLiteral("导出"));
     for (const QString &kind : {QStringLiteral("json"), QStringLiteral("yaml"), QStringLiteral("txt"),
@@ -83,16 +110,31 @@ void MainWindow::buildMenuBar()
 
 void MainWindow::connectSignals()
 {
-    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int index) {
-        if (index == ParametersPageIndex) syncParametersToController();
-    });
+    connect(m_homePage, &HomePage::startCalibrationRequested,
+            this, &MainWindow::onStartCalibration);
     connect(m_homePage, &HomePage::navigateRequested, this, &MainWindow::navigateToPage);
     connect(m_capturePage, &CapturePage::uploadRobotRequested, this, &MainWindow::onImportRobotPoseCsv);
     connect(m_capturePage, &CapturePage::uploadImagesRequested, this, &MainWindow::onImportCalibrationImages);
+    connect(m_capturePage, &CapturePage::generateBoardRequested,
+            this, [this] { navigateToPage(BoardPdfPageIndex); });
     connect(m_capturePage, &CapturePage::processRequested, this, &MainWindow::onProcessBoardImages);
+    connect(m_capturePage, &CapturePage::nextRequested, this, &MainWindow::onCaptureNext);
     connect(m_capturePage, &CapturePage::viewDataRequested, this, [this] { navigateToPage(CurrentDataPageIndex); });
     connect(m_capturePage, &CapturePage::viewResultsRequested, this, [this] { navigateToPage(ResultPageIndex); });
     connect(m_parametersPage, &ParametersPage::parametersChanged, this, &MainWindow::syncParametersToController);
+    connect(m_parametersPage, &ParametersPage::nextRequested, this, &MainWindow::onParametersNext);
+    connect(m_boardPdfPage, &BoardPdfPage::generateRequested,
+            this, &MainWindow::onGenerateBoardPdf);
+    connect(m_boardPdfPage, &BoardPdfPage::saveAsRequested,
+            this, &MainWindow::onSaveAsBoardPdf);
+    connect(m_boardPdfPage, &BoardPdfPage::openBoardPdfRequested,
+            this, &MainWindow::onOpenBoardPdf);
+    connect(m_boardPdfPage, &BoardPdfPage::openBoardPdfDirectoryRequested,
+            this, &MainWindow::onOpenBoardPdfDirectory);
+    connect(m_boardPdfPage, &BoardPdfPage::openDocumentsDirectoryRequested,
+            this, &MainWindow::onOpenDocumentsDirectory);
+    connect(m_boardPdfPage, &BoardPdfPage::openDocumentRequested,
+            this, &MainWindow::onOpenDocument);
     connect(m_cameraCalibrationPage, &CameraCalibrationPage::selectImagesRequested,
             this, &MainWindow::onSelectCameraCalibrationImages);
     connect(m_cameraCalibrationPage, &CameraCalibrationPage::detectRequested,
@@ -107,6 +149,8 @@ void MainWindow::connectSignals()
             this, [this] { navigateToPage(ParametersPageIndex); });
     connect(m_manualPosePage, &ManualPosePage::applyPointRequested,
             this, &MainWindow::onApplyManualPointInputs);
+    connect(m_manualPosePage, &ManualPosePage::applyPoseRequested,
+            this, &MainWindow::onApplyManualPoseInputs);
     connect(m_manualPosePage, &ManualPosePage::goParametersRequested,
             this, [this] { navigateToPage(ParametersPageIndex); });
     connect(m_manualPosePage, &ManualPosePage::goDataRequested,
@@ -115,6 +159,7 @@ void MainWindow::connectSignals()
             this, [this] { navigateToPage(ResultPageIndex); });
     connect(m_currentDataPage, &CurrentDataPage::deleteRequested,
             m_controller, &CalibrationController::deleteSamples);
+    connect(m_currentDataPage, &CurrentDataPage::nextRequested, this, &MainWindow::onDataNext);
     connect(m_resultPage, &CalibrationResultPage::calculateSelectedRequested,
             this, &MainWindow::onCalculateSelected);
     connect(m_resultPage, &CalibrationResultPage::calculateAllRequested,
@@ -166,16 +211,129 @@ void MainWindow::connectSignals()
             this, &MainWindow::onError);
 }
 
+void MainWindow::onStartCalibration()
+{
+    const CalibrationDataset &current = m_controller->dataset();
+    if (!current.samples.isEmpty() || !current.pointSamples.isEmpty() || !current.results.isEmpty()) {
+        const auto answer = QMessageBox::question(
+            this, QStringLiteral("开始新的手眼标定"),
+            QStringLiteral("开始新的标定流程会清空当前训练样本和结果，是否继续？"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) return;
+    }
+
+    // Keep the values currently shown on the parameter page when creating a new batch.
+    const PoseInputSpec spec = m_parametersPage->inputSpec();
+    const BoardSpec board = m_parametersPage->boardSpec();
+    const CameraIntrinsics intrinsics = m_parametersPage->cameraIntrinsics();
+    const QString robot = m_parametersPage->robotName();
+    const QString camera = m_parametersPage->cameraName();
+    const double rotationThreshold = m_parametersPage->passRotationRmseDeg();
+    const double translationThreshold = m_parametersPage->passTranslationRmseM();
+    const CalibrationMode mode = m_parametersPage->mode();
+    const CalibrationInputMode inputMode = m_parametersPage->inputMode();
+
+    m_controller->newDataset();
+    m_controller->synchronizeParameters(spec, robot, camera, board, intrinsics,
+                                         rotationThreshold, translationThreshold, mode, inputMode);
+    m_parametersPage->setDatasetParameters(m_controller->dataset());
+    navigateToPage(ParametersPageIndex);
+    statusBar()->showMessage(QStringLiteral("新标定流程已开始，请先完成参数设置。"));
+}
+
+void MainWindow::onParametersNext()
+{
+    syncParametersToController();
+    const BoardSpec board = m_parametersPage->boardSpec();
+    const bool boardValid = board.squareSizeM > 0.0
+                            && ((board.pattern == BoardPattern::Chessboard
+                                 && board.innerCornersX >= 2 && board.innerCornersY >= 2)
+                                || (board.pattern != BoardPattern::Chessboard
+                                    && board.markerCountX >= 2 && board.markerCountY >= 2
+                                    && board.markerSizeM > 0.0 && board.markerSeparationM >= 0.0));
+    if (!boardValid) {
+        QMessageBox::warning(this, QStringLiteral("参数不完整"),
+                             QStringLiteral("请检查标定板类型、尺寸和网格参数后再进入上传步骤。"));
+        return;
+    }
+    navigateToPage(CapturePageIndex);
+    statusBar()->showMessage(QStringLiteral("参数已确认，请上传本轮机器人坐标和标定板图片。"));
+}
+
+void MainWindow::onCaptureNext()
+{
+    syncParametersToController();
+    const CalibrationDataset &dataset = m_controller->dataset();
+    if (dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
+        if (dataset.pointSamples.isEmpty()) {
+            QMessageBox::information(this, QStringLiteral("尚未上传点基数据"),
+                                     QStringLiteral("当前为 FixedPoint3D 模式，请在“手动输入”页录入 TCP 与相机 XYZ，或切换为 PosePairs 后上传坐标和图片。"));
+            return;
+        }
+        navigateToPage(CurrentDataPageIndex);
+        return;
+    }
+
+    if (dataset.samples.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("尚未上传机器人坐标"),
+                                 QStringLiteral("请先上传机器人 TCP 坐标。"));
+        return;
+    }
+
+    int imageCount = 0;
+    for (const PoseSample &sample : dataset.samples)
+        if (!sample.imagePath.trimmed().isEmpty()) ++imageCount;
+    if (!dataset.targetPosesReady && imageCount == 0) {
+        QMessageBox::information(this, QStringLiteral("尚未上传标定图片"),
+                                 QStringLiteral("请上传与机器人坐标数量和顺序一致的标定板图片，或导入已处理的位姿数据。"));
+        return;
+    }
+    if (!dataset.targetPosesReady && imageCount != dataset.samples.size()) {
+        QMessageBox::warning(this, QStringLiteral("数据数量不一致"),
+                             QStringLiteral("当前有 %1 组机器人坐标，但只有 %2 张图片，请保持一一对应。")
+                                 .arg(dataset.samples.size()).arg(imageCount));
+        return;
+    }
+    if (!dataset.targetPosesReady && !m_controller->processBoardImages()) return;
+
+    navigateToPage(CurrentDataPageIndex);
+    statusBar()->showMessage(QStringLiteral("数据已准备，请逐组确认对应关系。"));
+}
+
+void MainWindow::onDataNext()
+{
+    syncParametersToController();
+    const CalibrationDataset &dataset = m_controller->dataset();
+    const int sampleCount = dataset.inputMode == CalibrationInputMode::FixedPoint3D
+                                ? dataset.pointSamples.size()
+                                : dataset.samples.size();
+    if (sampleCount < 3) {
+        QMessageBox::information(this, QStringLiteral("样本数量不足"),
+                                 QStringLiteral("至少需要 3 组有效样本才能进入标定计算。"));
+        return;
+    }
+    if (dataset.inputMode == CalibrationInputMode::PosePairs && !m_controller->ensureTargetPosesReady())
+        return;
+
+    m_controller->calculateAll();
+    navigateToPage(ResultPageIndex);
+    statusBar()->showMessage(QStringLiteral("已进入标定结果与分析，请等待计算完成。"));
+}
+
 void MainWindow::syncParametersToController()
 {
     if (!m_parametersPage || !m_controller) return;
     const PoseInputSpec spec = m_parametersPage->inputSpec();
-    m_cameraCalibrationPage->setBoardSpec(m_parametersPage->boardSpec());
+    const BoardSpec board = m_parametersPage->boardSpec();
+    const CameraIntrinsics intrinsics = m_parametersPage->cameraIntrinsics();
+    m_cameraCalibrationPage->setBoardSpec(board);
+    m_boardPdfPage->setBoardSpec(board);
     m_manualPosePage->setInputSpec(spec);
-    m_controller->updateInputSpec(spec, m_parametersPage->robotName(), m_parametersPage->cameraName());
-    m_controller->updateImageProcessing(m_parametersPage->boardSpec(), m_parametersPage->cameraIntrinsics());
-    m_controller->updateReliabilityThresholds(m_parametersPage->passRotationRmseDeg(),
-                                               m_parametersPage->passTranslationRmseM());
+    m_manualPosePage->setCalibrationMode(m_parametersPage->mode(), m_parametersPage->inputMode());
+    m_controller->synchronizeParameters(spec, m_parametersPage->robotName(), m_parametersPage->cameraName(),
+                                         board, intrinsics, m_parametersPage->passRotationRmseDeg(),
+                                         m_parametersPage->passTranslationRmseM(),
+                                         m_parametersPage->mode(), m_parametersPage->inputMode());
 }
 
 void MainWindow::navigateToPage(int index)
@@ -195,9 +353,7 @@ bool MainWindow::confirmPairing(const QString &operation)
 
 void MainWindow::onNewDataset()
 {
-    syncParametersToController();
-    m_controller->newDataset();
-    navigateToPage(CapturePageIndex);
+    onStartCalibration();
 }
 
 void MainWindow::onGenerateDemo()
@@ -282,6 +438,26 @@ void MainWindow::onApplyManualPointInputs(const QVector<PointSample> &samples,
     }
 }
 
+void MainWindow::onApplyManualPoseInputs(const QVector<ManualPoseInput> &samples,
+                                         const PoseInputSpec &spec, bool calculateAll)
+{
+    const CalibrationDataset &dataset = m_controller->dataset();
+    if (!dataset.samples.isEmpty() || !dataset.pointSamples.isEmpty()) {
+        const auto answer = QMessageBox::question(
+            this, QStringLiteral("替换当前训练数据"),
+            QStringLiteral("当前已有训练样本。应用手动 PosePairs 后将替换它们，是否继续？"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) return;
+    }
+    if (!m_controller->applyManualPoseInputs(samples, spec)) return;
+    if (calculateAll) {
+        m_controller->calculateAll();
+        navigateToPage(ResultPageIndex);
+    } else {
+        navigateToPage(CurrentDataPageIndex);
+    }
+}
+
 void MainWindow::onImportPoseImageCsv()
 {
     syncParametersToController();
@@ -317,6 +493,10 @@ void MainWindow::onImportJson()
     m_controller->importJson(path);
     const CalibrationDataset &dataset = m_controller->dataset();
     m_parametersPage->setDatasetParameters(dataset);
+    m_manualPosePage->setInputSpec(dataset.inputSpec);
+    m_manualPosePage->setCalibrationMode(dataset.mode, dataset.inputMode);
+    m_boardPdfPage->setBoardSpec(dataset.boardSpec);
+    m_boardPdfPage->setReport(dataset.lastBoardPdfReport);
     navigateToPage(CurrentDataPageIndex);
 }
 
@@ -411,8 +591,95 @@ void MainWindow::onProcessBoardImages()
     if (m_controller->processBoardImages()) navigateToPage(CurrentDataPageIndex);
 }
 
+void MainWindow::onGenerateBoardPdf(BoardPdfOutputMode mode)
+{
+    syncParametersToController();
+    const BoardSpec board = m_parametersPage->boardSpec();
+    const QString existingPath = BoardPdfStorage::findExistingPath(board, mode);
+    BoardPdfReport report;
+    if (!existingPath.isEmpty()) {
+        report = BoardPdfGenerator::describeExisting(board, existingPath, mode);
+    } else {
+        QString error;
+        const QString path = BoardPdfStorage::nextOutputPath(board, mode, &error);
+        if (path.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("生成标定板失败"), error);
+            return;
+        }
+        report = BoardPdfGenerator::generate(board, path, mode);
+    }
+    m_boardPdfPage->setReport(report);
+    if (!report.success) {
+        QMessageBox::warning(this, QStringLiteral("生成标定板失败"), report.error);
+        return;
+    }
+    m_controller->recordBoardPdfReport(report);
+    statusBar()->showMessage((report.reused ? QStringLiteral("已复用同规格标定板 PDF：")
+                                            : QStringLiteral("标定板 PDF 已生成："))
+                             + report.outputPath);
+}
+
+void MainWindow::onSaveAsBoardPdf(BoardPdfOutputMode mode)
+{
+    syncParametersToController();
+    QString error;
+    if (!BoardPdfStorage::ensureDirectory(&error)) {
+        QMessageBox::warning(this, QStringLiteral("另存标定板失败"), error);
+        return;
+    }
+
+    const BoardSpec board = m_parametersPage->boardSpec();
+    const QString defaultPath = QDir(BoardPdfStorage::directory())
+                                    .filePath(BoardPdfStorage::suggestedFileName(board, mode));
+    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("另存标定板 PDF"), defaultPath,
+                                                QStringLiteral("PDF 文件 (*.pdf)"));
+    if (path.isEmpty()) return;
+    if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) path += QStringLiteral(".pdf");
+
+    const BoardPdfReport report = BoardPdfGenerator::generate(board, path, mode);
+    m_boardPdfPage->setReport(report);
+    if (!report.success) {
+        QMessageBox::warning(this, QStringLiteral("另存标定板失败"), report.error);
+        return;
+    }
+    m_controller->recordBoardPdfReport(report);
+    statusBar()->showMessage(QStringLiteral("标定板 PDF 已另存：") + report.outputPath);
+}
+
+void MainWindow::onOpenBoardPdf(const QString &path)
+{
+    if (path.trimmed().isEmpty() || !QFileInfo::exists(path)) {
+        QMessageBox::warning(this, QStringLiteral("无法打开 PDF"), QStringLiteral("最近生成的 PDF 文件不存在。"));
+        return;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path)))
+        QMessageBox::warning(this, QStringLiteral("无法打开 PDF"), path);
+}
+
+void MainWindow::onOpenBoardPdfDirectory()
+{
+    QString error;
+    if (!BoardPdfStorage::openDirectory(&error))
+        QMessageBox::warning(this, QStringLiteral("无法打开 PDF 输出目录"), error);
+}
+
+void MainWindow::onOpenDocumentsDirectory()
+{
+    QString error;
+    if (!DocumentService::openDocumentsDirectory(&error))
+        QMessageBox::warning(this, QStringLiteral("无法打开说明文档目录"), error);
+}
+
+void MainWindow::onOpenDocument(const QString &fileName)
+{
+    QString error;
+    if (!DocumentService::openDocument(fileName, &error))
+        QMessageBox::warning(this, QStringLiteral("无法打开说明文档"), error);
+}
+
 void MainWindow::onSamplesChanged(const QVector<PoseSample> &samples)
 {
+    m_manualPosePage->setCalibrationMode(m_controller->dataset().mode, m_controller->dataset().inputMode);
     m_resultPage->setReferenceSampleIds(samples);
     QVector<PoseSample> displaySamples = samples;
     if (m_controller->dataset().inputMode == CalibrationInputMode::FixedPoint3D) {
@@ -431,6 +698,7 @@ void MainWindow::onSamplesChanged(const QVector<PoseSample> &samples)
             displaySamples.append(display);
         }
     }
+    m_currentDataPage->setMode(m_controller->dataset().mode, m_controller->dataset().inputMode);
     m_currentDataPage->setSamples(displaySamples);
     int imageCount = 0;
     int targetCount = 0;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/board_pdf_generator.h"
 #include "domain/calibration_types.h"
 
 #include <QMainWindow>
@@ -13,6 +14,7 @@ class CalibrationController;
 class HomePage;
 class CapturePage;
 class ParametersPage;
+class BoardPdfPage;
 class CameraCalibrationPage;
 class ManualPosePage;
 class CurrentDataPage;
@@ -26,6 +28,10 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
 
 private slots:
+    void onStartCalibration();
+    void onParametersNext();
+    void onCaptureNext();
+    void onDataNext();
     void onNewDataset();
     void onGenerateDemo();
     void onImportRobotPoseCsv();
@@ -37,6 +43,8 @@ private slots:
     void onClearCameraCalibrationImages();
     void onApplyManualPointInputs(const QVector<PointSample> &samples,
                                   const PoseInputSpec &spec, bool calculateAll);
+    void onApplyManualPoseInputs(const QVector<ManualPoseInput> &samples,
+                                 const PoseInputSpec &spec, bool calculateAll);
     void onImportPoseImageCsv();
     void onImportProcessedCsv();
     void onImportValidationCsv();
@@ -49,6 +57,12 @@ private slots:
     void onComputeFixedTarget(int referenceSampleId);
     void onOptimizeRecommended();
     void onProcessBoardImages();
+    void onGenerateBoardPdf(BoardPdfOutputMode mode);
+    void onSaveAsBoardPdf(BoardPdfOutputMode mode);
+    void onOpenBoardPdf(const QString &path);
+    void onOpenBoardPdfDirectory();
+    void onOpenDocumentsDirectory();
+    void onOpenDocument(const QString &fileName);
     void onSamplesChanged(const QVector<PoseSample> &samples);
     void onResultsChanged(const QVector<CalibrationResult> &results);
     void onReliabilityChanged(const CalibrationResult &result);
@@ -70,7 +84,7 @@ private slots:
 private:
     enum Page { HomePageIndex = 0, CapturePageIndex = 1, ParametersPageIndex = 2,
                 CameraCalibrationPageIndex = 3, ManualPosePageIndex = 4,
-                CurrentDataPageIndex = 5, ResultPageIndex = 6 };
+                BoardPdfPageIndex = 5, CurrentDataPageIndex = 6, ResultPageIndex = 7 };
 
     void buildPages();
     void buildMenuBar();
@@ -85,6 +99,7 @@ private:
     HomePage *m_homePage = nullptr;
     CapturePage *m_capturePage = nullptr;
     ParametersPage *m_parametersPage = nullptr;
+    BoardPdfPage *m_boardPdfPage = nullptr;
     CameraCalibrationPage *m_cameraCalibrationPage = nullptr;
     ManualPosePage *m_manualPosePage = nullptr;
     CurrentDataPage *m_currentDataPage = nullptr;
