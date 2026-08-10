@@ -18,7 +18,6 @@ jobs:
         with:
           version: 6.9.3
           arch: win64_msvc2022_64
-          modules: qtbase
           cache: true
 
       - name: Install OpenCV
