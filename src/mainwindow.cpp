@@ -209,6 +209,10 @@ void MainWindow::connectSignals()
             this, &MainWindow::onReliabilityPipelineChanged);
     connect(m_controller, &CalibrationController::error,
             this, &MainWindow::onError);
+    connect(m_controller, &CalibrationController::poseDataReimportRequired,
+            this, [this](const QString &message) {
+                onError(QStringLiteral("需要重新导入原始数据"), message);
+            });
 }
 
 void MainWindow::onStartCalibration()

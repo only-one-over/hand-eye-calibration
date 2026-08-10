@@ -252,6 +252,15 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
         return report;
     }
 
+    report.smallSampleMode = count < 8;
+    report.uncertaintyReliable = !report.smallSampleMode;
+    report.minimumUniqueSamples = dataset.inputMode == CalibrationInputMode::FixedPoint3D ? 5 : 3;
+    if (report.smallSampleMode) {
+        report.warnings << QStringLiteral(
+            "当前仅有 %1 组样本，Bootstrap 使用覆盖全部原始样本的稳定模式；不确定度仅供参考。")
+                               .arg(count);
+    }
+
     CalibrationMethod method = finalResult.seedMethod;
     const bool eyeToHand = dataset.mode == CalibrationMode::EyeToHand;
     if (method == CalibrationMethod::Nonlinear)
@@ -271,10 +280,16 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
     for (int iteration = 0; iteration < report.requestedResamples; ++iteration) {
         CalibrationDataset resampled = dataset;
         QSet<int> sourceIds;
+        // With 5-7 samples, preserve every original observation and add a few
+        // random duplicates. This avoids rejecting almost every ordinary
+        // bootstrap draw simply because it contains too few unique poses.
+        const int resampleCount = report.smallSampleMode ? std::max(count, 8) : count;
         if (dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
             resampled.pointSamples.clear();
-            for (int index = 0; index < count; ++index) {
-                const int sourceIndex = static_cast<int>(generator.bounded(count));
+            for (int index = 0; index < resampleCount; ++index) {
+                const int sourceIndex = report.smallSampleMode && index < count
+                                            ? index
+                                            : static_cast<int>(generator.bounded(count));
                 PointSample sample = dataset.pointSamples.at(sourceIndex);
                 sourceIds.insert(sample.id);
                 sample.id = index + 1;
@@ -282,8 +297,10 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
             }
         } else {
             resampled.samples.clear();
-            for (int index = 0; index < count; ++index) {
-                const int sourceIndex = static_cast<int>(generator.bounded(count));
+            for (int index = 0; index < resampleCount; ++index) {
+                const int sourceIndex = report.smallSampleMode && index < count
+                                            ? index
+                                            : static_cast<int>(generator.bounded(count));
                 PoseSample sample = dataset.samples.at(sourceIndex);
                 sourceIds.insert(sample.id);
                 sample.id = index + 1;
@@ -291,7 +308,7 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
             }
         }
 
-        if (sourceIds.size() < 5) {
+        if (!report.smallSampleMode && sourceIds.size() < report.minimumUniqueSamples) {
             ++report.invalidResamples;
             continue;
         }
@@ -339,6 +356,8 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
     report.successfulResamples = rotationSamples.size();
     const int required = std::max(1, static_cast<int>(std::ceil(report.requestedResamples * 0.8)));
     report.success = report.successfulResamples >= required;
+    report.uncertaintyReliable = !report.smallSampleMode && report.success
+                                 && report.successfulResamples > 0;
     if (rotationSamples.isEmpty()) {
         report.message = QStringLiteral("Bootstrap 没有成功重采样。");
         report.warnings << report.message;
@@ -383,9 +402,10 @@ BootstrapReport bootstrap(const CalibrationDataset &dataset, const CalibrationRe
     report.translationNormStdM = std::sqrt(translationNormSquared * inverseCount);
     report.successRate = static_cast<double>(report.successfulResamples)
                          / static_cast<double>(report.requestedResamples);
-    report.message = QStringLiteral("Bootstrap 完成：%1/%2 次成功，置信水平 %3%。")
+    report.message = QStringLiteral("Bootstrap 完成：%1/%2 次成功，置信水平 %3%。%4")
                          .arg(report.successfulResamples).arg(report.requestedResamples)
-                         .arg(report.confidenceLevel * 100.0, 0, 'f', 1);
+                         .arg(report.confidenceLevel * 100.0, 0, 'f', 1)
+                         .arg(report.smallSampleMode ? QStringLiteral(" 小样本模式结果仅供稳定性参考。") : QString());
     if (!report.success)
         report.warnings << QStringLiteral("成功重采样比例低于 80%，不确定度仅供参考。");
     return report;
@@ -426,6 +446,15 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
         QVector<CalibrationResult> rawResults = calculateResults(working);
         CalibrationResult best = chooseResult(rawResults);
         if (!best.success) {
+            if (working.inputMode == CalibrationInputMode::FixedPoint3D && !rawResults.isEmpty()) {
+                execution.report.eyeToHandPointReport = rawResults.first().eyeToHandPointReport;
+                const EyeToHandPointReport &point = execution.report.eyeToHandPointReport;
+                addStage(&execution.report, QStringLiteral("FixedPoint3D 秩与条件数"),
+                         point.fullRank ? PipelineStageState::Warning : PipelineStageState::Failed,
+                         QStringLiteral("rank %1/15，condition number %2。")
+                             .arg(point.linearRank)
+                             .arg(point.linearConditionNumber, 0, 'g', 6));
+            }
             execution.report.errors << QStringLiteral("Robot-World 或点基 Eye-To-Hand 算法无法求解。");
             addStage(&execution.report, QStringLiteral("AX=YB / 点基计算"), PipelineStageState::Failed,
                      execution.report.errors.last());
@@ -435,6 +464,17 @@ ReliabilityPipelineExecution ReliabilityPipelineService::run(const CalibrationDa
         }
         addStage(&execution.report, QStringLiteral("AX=YB / 点基计算"), PipelineStageState::Passed,
                  QStringLiteral("推荐方法：%1。" ).arg(methodName(best.method)));
+        if (working.inputMode == CalibrationInputMode::FixedPoint3D) {
+            const EyeToHandPointReport &point = best.eyeToHandPointReport;
+            addStage(&execution.report, QStringLiteral("FixedPoint3D 秩与条件数"),
+                     point.fullRank && point.conditionAcceptable ? PipelineStageState::Passed
+                                                                   : PipelineStageState::Warning,
+                     QStringLiteral("rank %1/15，condition number %2，%3。")
+                         .arg(point.linearRank)
+                         .arg(point.linearConditionNumber, 0, 'g', 6)
+                         .arg(point.conditionAcceptable ? QStringLiteral("条件数可接受")
+                                                        : QStringLiteral("条件数过高")));
+        }
         const QSet<int> verifiedRemoved = verifyAndRemoveOutliers(&working, {}, &execution.report);
         if (!verifiedRemoved.isEmpty()) {
             rawResults = calculateResults(working);

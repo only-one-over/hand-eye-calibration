@@ -340,7 +340,15 @@ struct PointState {
     cv::Vec3d pointInGripper{0.0, 0.0, 0.0};
 };
 
-PointState pointLinearInitial(const QVector<PointSample> &samples)
+struct PointLinearInitial {
+    PointState state;
+    int rank = 0;
+    double conditionNumber = std::numeric_limits<double>::infinity();
+    bool fullRank = false;
+    bool conditionAcceptable = false;
+};
+
+PointLinearInitial pointLinearInitial(const QVector<PointSample> &samples)
 {
     cv::Mat lhs(samples.size() * 3, 15, CV_64F, cv::Scalar(0));
     cv::Mat rhs(samples.size() * 3, 1, CV_64F, cv::Scalar(0));
@@ -359,6 +367,25 @@ PointState pointLinearInitial(const QVector<PointSample> &samples)
             rhs.at<double>(base + output, 0) = robot(output, 3);
         }
     }
+    cv::Mat singularValues;
+    cv::SVD::compute(lhs, singularValues, cv::noArray(), cv::noArray());
+    const double sigmaMax = singularValues.empty() ? 0.0 : singularValues.at<double>(0, 0);
+    const double tolerance = std::max(lhs.rows, lhs.cols) * std::numeric_limits<double>::epsilon()
+                             * std::max(sigmaMax, 1.0);
+    PointLinearInitial initial;
+    double sigmaMinNonZero = std::numeric_limits<double>::infinity();
+    for (int index = 0; index < singularValues.rows; ++index) {
+        const double sigma = singularValues.at<double>(index, 0);
+        if (sigma > tolerance) {
+            ++initial.rank;
+            sigmaMinNonZero = std::min(sigmaMinNonZero, sigma);
+        }
+    }
+    initial.fullRank = initial.rank == 15;
+    if (initial.rank > 0 && std::isfinite(sigmaMinNonZero) && sigmaMinNonZero > 0.0)
+        initial.conditionNumber = sigmaMax / sigmaMinNonZero;
+    initial.conditionAcceptable = std::isfinite(initial.conditionNumber)
+                                  && initial.conditionNumber <= 1e8;
     // The first nine variables are R_cameraToBase in row-major order.
     cv::Mat solution;
     cv::solve(lhs, rhs, solution, cv::DECOMP_SVD);
@@ -375,11 +402,10 @@ PointState pointLinearInitial(const QVector<PointSample> &samples)
     cv::Matx33d rotation;
     for (int row = 0; row < 3; ++row)
         for (int col = 0; col < 3; ++col) rotation(row, col) = projected.at<double>(row, col);
-    PointState state;
-    state.cameraToBase = poseOf(matrix::toRodrigues(rotation),
-                                {solution.at<double>(9), solution.at<double>(10), solution.at<double>(11)});
-    state.pointInGripper = {solution.at<double>(12), solution.at<double>(13), solution.at<double>(14)};
-    return state;
+    initial.state.cameraToBase = poseOf(matrix::toRodrigues(rotation),
+                                        {solution.at<double>(9), solution.at<double>(10), solution.at<double>(11)});
+    initial.state.pointInGripper = {solution.at<double>(12), solution.at<double>(13), solution.at<double>(14)};
+    return initial;
 }
 
 double pointLoss(const QVector<PointSample> &samples, const PointState &state)
@@ -583,12 +609,38 @@ CalibrationResult solvePoint(const CalibrationDataset &dataset)
         result.eyeToHandPointReport.errors = errors;
         return result;
     }
-    PointState state = pointLinearInitial(samples);
+    const PointLinearInitial initial = pointLinearInitial(samples);
+    result.eyeToHandPointReport.available = true;
+    result.eyeToHandPointReport.linearRank = initial.rank;
+    result.eyeToHandPointReport.linearConditionNumber = initial.conditionNumber;
+    result.eyeToHandPointReport.fullRank = initial.fullRank;
+    result.eyeToHandPointReport.conditionAcceptable = initial.conditionAcceptable;
+    if (!initial.fullRank) {
+        result.eyeToHandPointReport.errors
+            << QStringLiteral("Eye-To-Hand FixedPoint3D 线性系统秩不足：rank=%1/15。")
+                   .arg(initial.rank);
+        result.message = result.eyeToHandPointReport.errors.constFirst();
+        result.elapsedMs = timer.elapsed();
+        return result;
+    }
+    if (!initial.conditionAcceptable) {
+        result.eyeToHandPointReport.warnings
+            << QStringLiteral("Eye-To-Hand FixedPoint3D 线性系统条件数为 %1，超过 1e8，结果未通过条件数检查。")
+                   .arg(initial.conditionNumber, 0, 'g', 6);
+    }
+    PointState state = initial.state;
     result.optimizationReport = {};
     state = refinePoint(samples, state, &result.optimizationReport);
     result.cameraToBase = matrix::toArray(state.cameraToBase);
     result.pointInGripper = {state.pointInGripper[0], state.pointInGripper[1], state.pointInGripper[2]};
     result.eyeToHandPointReport = pointReport(samples, state.cameraToBase, state.pointInGripper);
+    result.eyeToHandPointReport.linearRank = initial.rank;
+    result.eyeToHandPointReport.linearConditionNumber = initial.conditionNumber;
+    result.eyeToHandPointReport.fullRank = initial.fullRank;
+    result.eyeToHandPointReport.conditionAcceptable = initial.conditionAcceptable;
+    if (!initial.conditionAcceptable)
+        result.eyeToHandPointReport.warnings
+            << QStringLiteral("条件数超过 1e8，点基结果只能作为参考。" );
     result.fixedPointReport.available = result.eyeToHandPointReport.available;
     result.fixedPointReport.success = result.eyeToHandPointReport.success;
     result.fixedPointReport.robustMeanPoint = result.eyeToHandPointReport.pointInGripper;
@@ -603,7 +655,9 @@ CalibrationResult solvePoint(const CalibrationDataset &dataset)
     result.axXbReport.translationRmseM = result.eyeToHandPointReport.rmseM;
     result.axXbReport.translationMeanM = result.eyeToHandPointReport.meanErrorM;
     result.axXbReport.translationMaxM = result.eyeToHandPointReport.maxErrorM;
-    result.axXbReport.passed = result.eyeToHandPointReport.rmseM <= dataset.passTranslationRmseM;
+    result.axXbReport.passed = result.eyeToHandPointReport.rmseM <= dataset.passTranslationRmseM
+                               && result.eyeToHandPointReport.fullRank
+                               && result.eyeToHandPointReport.conditionAcceptable;
     for (const FixedPointSample &sample : result.eyeToHandPointReport.samples)
         result.axXbReport.sampleResiduals.append({sample.sampleId, 0.0, sample.residualM,
                                                   sample.residualM / std::max(dataset.passTranslationRmseM, 1e-12),

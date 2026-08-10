@@ -246,9 +246,13 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
     }
     if (result.eyeToHandPointReport.available) {
         const EyeToHandPointReport &report = result.eyeToHandPointReport;
-        m_axXbReport->setText(QStringLiteral("Eye-To-Hand 点基一致性\nRMSE：%1 m | 平均：%2 m | 最大：%3 m\n异常样本：%4")
+        m_axXbReport->setText(QStringLiteral("Eye-To-Hand 点基一致性\nRMSE：%1 m | 平均：%2 m | 最大：%3 m\n异常样本：%4\n线性诊断：rank %5/15 | condition number %6 | %7")
                                   .arg(report.rmseM, 0, 'f', 7).arg(report.meanErrorM, 0, 'f', 7)
-                                  .arg(report.maxErrorM, 0, 'f', 7).arg(report.outlierCount));
+                                  .arg(report.maxErrorM, 0, 'f', 7).arg(report.outlierCount)
+                                  .arg(report.linearRank)
+                                  .arg(report.linearConditionNumber, 0, 'g', 6)
+                                  .arg(report.fullRank && report.conditionAcceptable ? QStringLiteral("通过")
+                                                                                       : QStringLiteral("未通过")));
         m_fixedTargetReport->setText(QStringLiteral("输出：camera→base\nTCP 上特征点：[%1, %2, %3] m")
                                          .arg(report.pointInGripper[0], 0, 'f', 6)
                                          .arg(report.pointInGripper[1], 0, 'f', 6)
@@ -268,10 +272,14 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
             m_poseReportTable->setItem(row, 3, new QTableWidgetItem(sample.outlier ? QStringLiteral("异常") : QStringLiteral("正常")));
         }
         m_poseReportTable->resizeColumnsToContents();
-        m_reliability->setText(QStringLiteral("Eye-To-Hand FixedPoint3D | camera→base\n固定点残差 RMSE：%1 m | 非线性优化：%2 → %3 m")
+        m_reliability->setText(QStringLiteral("Eye-To-Hand FixedPoint3D | camera→base\n固定点残差 RMSE：%1 m | 非线性优化：%2 → %3 m\n线性系统：rank %4/15，condition number %5，%6")
                                    .arg(report.rmseM, 0, 'f', 7)
                                    .arg(result.optimizationReport.beforeTranslationRmseM, 0, 'f', 7)
-                                   .arg(result.optimizationReport.afterTranslationRmseM, 0, 'f', 7));
+                                   .arg(result.optimizationReport.afterTranslationRmseM, 0, 'f', 7)
+                                   .arg(report.linearRank)
+                                   .arg(report.linearConditionNumber, 0, 'g', 6)
+                                   .arg(report.fullRank && report.conditionAcceptable ? QStringLiteral("诊断通过")
+                                                                                         : QStringLiteral("诊断未通过")));
         return;
     }
     const AxXbReport &axXb = result.axXbReport;
@@ -343,6 +351,10 @@ void CalibrationResultPage::showReliability(const CalibrationResult &result)
                     .arg(result.bootstrapReport.successRate * 100.0, 0, 'f', 1)
                     .arg(result.bootstrapReport.rotationNormStdDeg, 0, 'f', 5)
                     .arg(result.bootstrapReport.translationNormStdM, 0, 'f', 7);
+        text += QStringLiteral("\nBootstrap 模式：%1 | 不确定度可靠：%2")
+                    .arg(result.bootstrapReport.smallSampleMode ? QStringLiteral("小样本稳定模式")
+                                                                : QStringLiteral("普通模式"))
+                    .arg(result.bootstrapReport.uncertaintyReliable ? QStringLiteral("是") : QStringLiteral("否"));
     }
     m_poseReportTable->clearContents();
     if (result.fixedTargetReport.available) {
@@ -407,7 +419,7 @@ void CalibrationResultPage::showPipelineReport(const ReliabilityPipelineReport &
         m_uncertainty->setText(QStringLiteral("Bootstrap 未执行：%1").arg(report.message));
         return;
     }
-    m_uncertainty->setText(
+    const QString pipelineText =
         QStringLiteral("最终矩阵：%1 | 流水线：%2 | 样本 %3 → %4（自动剔除 %5）\n"
                        "Bootstrap：%6/%7 成功，Bootstrap 成功率 %8%\n"
                        "旋转标准差：[%9, %10, %11]°，95%% 区间：[%12, %13, %14]° ～ [%15, %16, %17]°\n"
@@ -434,7 +446,12 @@ void CalibrationResultPage::showPipelineReport(const ReliabilityPipelineReport &
             .arg(bootstrap.translationLowerM[2], 0, 'f', 7)
             .arg(bootstrap.translationUpperM[0], 0, 'f', 7)
             .arg(bootstrap.translationUpperM[1], 0, 'f', 7)
-            .arg(bootstrap.translationUpperM[2], 0, 'f', 7));
+            .arg(bootstrap.translationUpperM[2], 0, 'f', 7);
+    m_uncertainty->setText(pipelineText + QStringLiteral("\nBootstrap 模式：%1 | 不确定度可靠：%2")
+                                             .arg(bootstrap.smallSampleMode ? QStringLiteral("小样本稳定模式")
+                                                                         : QStringLiteral("普通模式"))
+                                             .arg(bootstrap.uncertaintyReliable ? QStringLiteral("是")
+                                                                                : QStringLiteral("否")));
 }
 
 void CalibrationResultPage::showMatrix(const CalibrationResult &result)

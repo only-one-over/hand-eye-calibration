@@ -149,6 +149,14 @@ double recommendationScore(const CalibrationDataset &dataset, const CalibrationR
 
 } // namespace
 
+AxXbReport CalibrationService::evaluateAxXb(const CalibrationDataset &dataset,
+                                            const Matrix4 &cameraToGripper,
+                                            const QVector<PoseSample> &samples)
+{
+    const QVector<PoseSample> &evaluationSamples = samples.isEmpty() ? dataset.samples : samples;
+    return evaluate(dataset, evaluationSamples, matrix::toMat(cameraToGripper));
+}
+
 CalibrationResult CalibrationService::calibrate(const CalibrationDataset &dataset, CalibrationMethod method)
 {
     CalibrationResult result;

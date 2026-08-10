@@ -1,9 +1,12 @@
 #include "controllers/calibration_controller.h"
 #include "core/board_pdf_generator.h"
 #include "core/board_pdf_storage.h"
+#include "core/calibration_service.h"
 #include "core/matrix_utils.h"
+#include "core/nonlinear_optimizer.h"
 #include "core/normalized_huber.h"
 #include "core/pose_conversion.h"
+#include "core/pose_quality_service.h"
 #include "core/reliability_pipeline_service.h"
 #include "core/synthetic_dataset.h"
 #include "io/dataset_io.h"
@@ -48,11 +51,15 @@ private slots:
     void normalizedHuberDownWeightsOutlier();
     void quaternionCsvFieldCountIsStrict();
     void parameterChangePreservesManualPose();
+    void poseAdapterChangeRequiresReimport();
+    void nonlinearReportsRemainSeparate();
     void bootstrapReportsSuccessRate();
+    void bootstrapSmallSampleMode();
     void jsonRoundTripPersistsConventionAndMarkerSeparation();
     void boardPdfGenerationAndDocumentFallback();
     void eyeToHandPosePairsRecoverMatrices();
     void eyeToHandPointModeRecoversExtrinsics();
+    void eyeToHandPointReportsRankCondition();
     void eyeToHandJsonRoundTripKeepsDirections();
     void eyeToHandReliabilityPipelineRuns();
 };
@@ -153,6 +160,89 @@ void HandeyeUnitTest::parameterChangePreservesManualPose()
     QCOMPARE(controller.dataset().samples.first().targetTranslation, targetBefore);
 }
 
+void HandeyeUnitTest::poseAdapterChangeRequiresReimport()
+{
+    const CalibrationDataset synthetic = makeSyntheticDataset();
+    QVector<ManualPoseInput> inputs;
+    for (const PoseSample &sample : synthetic.samples) {
+        ManualPoseInput input;
+        input.id = sample.id;
+        input.tcpRotation = {sample.gripperRotation[0], sample.gripperRotation[1], sample.gripperRotation[2], 0.0};
+        input.tcpTranslation = sample.gripperTranslation;
+        input.cameraRotation = {sample.targetRotation[0], sample.targetRotation[1], sample.targetRotation[2], 0.0};
+        input.cameraTranslation = sample.targetTranslation;
+        inputs.append(input);
+    }
+    CalibrationController controller;
+    QVERIFY(controller.applyManualPoseInputs(inputs, PoseInputSpec{}));
+    QVERIFY(!controller.dataset().poseDataNeedsReimport);
+
+    PoseInputSpec changed = controller.dataset().inputSpec;
+    changed.adapter = PoseAdapterKind::Kuka;
+    changed.convention = PoseConvention::KukaAbcZyx;
+    QSignalSpy reimportSpy(&controller, &CalibrationController::poseDataReimportRequired);
+    controller.synchronizeParameters(changed, controller.dataset().robotName,
+                                     controller.dataset().cameraName, controller.dataset().boardSpec,
+                                     controller.dataset().cameraIntrinsics,
+                                     controller.dataset().passRotationRmseDeg,
+                                     controller.dataset().passTranslationRmseM,
+                                     controller.dataset().mode, controller.dataset().inputMode);
+    QVERIFY(controller.dataset().poseDataNeedsReimport);
+    QCOMPARE(reimportSpy.count(), 1);
+    QSignalSpy errorSpy(&controller, &CalibrationController::error);
+    controller.calculateSelected(CalibrationMethod::Tsai);
+    QVERIFY(errorSpy.count() > 0);
+    QVERIFY(controller.applyManualPoseInputs(inputs, changed));
+    QVERIFY(!controller.dataset().poseDataNeedsReimport);
+
+    CalibrationController namedController;
+    QVERIFY(namedController.applyManualPoseInputs(inputs, PoseInputSpec{}));
+    namedController.synchronizeParameters(namedController.dataset().inputSpec, QStringLiteral("Robot-A"),
+                                          namedController.dataset().cameraName,
+                                          namedController.dataset().boardSpec,
+                                          namedController.dataset().cameraIntrinsics,
+                                          namedController.dataset().passRotationRmseDeg,
+                                          namedController.dataset().passTranslationRmseM,
+                                          namedController.dataset().mode, namedController.dataset().inputMode);
+    QVERIFY(!namedController.dataset().poseDataNeedsReimport);
+}
+
+void HandeyeUnitTest::nonlinearReportsRemainSeparate()
+{
+    CalibrationDataset dataset = makeSyntheticDataset();
+    dataset.samples[0].targetTranslation[0] += 0.012;
+    dataset.samples[0].targetRotation[1] += 0.035;
+    const CalibrationResult seed = CalibrationService::calibrate(dataset, CalibrationMethod::Tsai);
+    QVERIFY(seed.success);
+    const CalibrationResult refined = NonlinearOptimizer::refinePose(dataset, seed);
+    QVERIFY(refined.success);
+
+    const AxXbReport independentAxXb = CalibrationService::evaluateAxXb(dataset, refined.cameraToGripper);
+    const FixedTargetPoseReport independentFixed = PoseQualityService::computeFixedTargetPose(
+        dataset, refined.cameraToGripper);
+    QVERIFY(std::abs(refined.axXbReport.rotationRmseDeg - independentAxXb.rotationRmseDeg) < 1e-12);
+    QVERIFY(std::abs(refined.axXbReport.translationRmseM - independentAxXb.translationRmseM) < 1e-12);
+    QVERIFY(std::abs(refined.fixedTargetReport.rotationRmseDeg - independentFixed.rotationRmseDeg) < 1e-12);
+    QVERIFY(std::abs(refined.fixedTargetReport.translationRmseM - independentFixed.translationRmseM) < 1e-12);
+    QCOMPARE(refined.axXbReport.sampleCount, independentAxXb.sampleCount);
+    QCOMPARE(refined.fixedTargetReport.samples.size(), independentFixed.samples.size());
+    QVERIFY(std::abs(refined.axXbReport.translationRmseM - refined.fixedTargetReport.translationRmseM) > 1e-9);
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    CalibrationDataset serialized;
+    serialized.samples = dataset.samples;
+    serialized.results = {refined};
+    const QString path = directory.filePath(QStringLiteral("reports.json"));
+    QVERIFY(writeJson(path, serialized).success);
+    CalibrationDataset restored;
+    QVERIFY(readJson(path, &restored).success);
+    QVERIFY(std::abs(restored.results.first().axXbReport.translationRmseM
+                     - refined.axXbReport.translationRmseM) < 1e-12);
+    QVERIFY(std::abs(restored.results.first().fixedTargetReport.translationRmseM
+                     - refined.fixedTargetReport.translationRmseM) < 1e-12);
+}
+
 void HandeyeUnitTest::bootstrapReportsSuccessRate()
 {
     CalibrationDataset dataset = makeSyntheticDataset();
@@ -165,6 +255,22 @@ void HandeyeUnitTest::bootstrapReportsSuccessRate()
                  : 0.0);
 }
 
+void HandeyeUnitTest::bootstrapSmallSampleMode()
+{
+    for (int count : {5, 7}) {
+        const CalibrationDataset dataset = makeSyntheticDataset(count);
+        const ReliabilityPipelineExecution execution = ReliabilityPipelineService::run(dataset, 2, 0.95);
+        const BootstrapReport &report = execution.report.bootstrapReport;
+        QVERIFY2(report.available, qPrintable(QStringLiteral("count=%1: %2").arg(count).arg(execution.report.message)));
+        QVERIFY(report.smallSampleMode);
+        QVERIFY(!report.uncertaintyReliable);
+        QCOMPARE(report.minimumUniqueSamples, 3);
+        QCOMPARE(report.successRate,
+                 report.requestedResamples > 0
+                     ? static_cast<double>(report.successfulResamples) / report.requestedResamples : 0.0);
+    }
+}
+
 void HandeyeUnitTest::jsonRoundTripPersistsConventionAndMarkerSeparation()
 {
     QTemporaryDir directory;
@@ -174,6 +280,11 @@ void HandeyeUnitTest::jsonRoundTripPersistsConventionAndMarkerSeparation()
     source.inputSpec.adapter = PoseAdapterKind::Kuka;
     source.inputSpec.convention = PoseConvention::KukaAbcZyx;
     source.boardSpec.markerSeparationM = 0.012;
+    source.poseDataNeedsReimport = true;
+    source.reliabilityPipelineReport.bootstrapReport.available = true;
+    source.reliabilityPipelineReport.bootstrapReport.smallSampleMode = true;
+    source.reliabilityPipelineReport.bootstrapReport.uncertaintyReliable = false;
+    source.reliabilityPipelineReport.bootstrapReport.successRate = 0.75;
     const QString path = directory.filePath(QStringLiteral("roundtrip.json"));
     QVERIFY(writeJson(path, source).success);
 
@@ -181,6 +292,10 @@ void HandeyeUnitTest::jsonRoundTripPersistsConventionAndMarkerSeparation()
     QVERIFY(readJson(path, &restored).success);
     QCOMPARE(restored.inputSpec.convention, PoseConvention::KukaAbcZyx);
     QCOMPARE(restored.boardSpec.markerSeparationM, 0.012);
+    QVERIFY(restored.poseDataNeedsReimport);
+    QVERIFY(restored.reliabilityPipelineReport.bootstrapReport.smallSampleMode);
+    QVERIFY(!restored.reliabilityPipelineReport.bootstrapReport.uncertaintyReliable);
+    QCOMPARE(restored.reliabilityPipelineReport.bootstrapReport.successRate, 0.75);
 }
 
 void HandeyeUnitTest::boardPdfGenerationAndDocumentFallback()
@@ -313,6 +428,46 @@ void HandeyeUnitTest::eyeToHandPointModeRecoversExtrinsics()
     QVERIFY(std::abs(result.pointInGripper[1] - pointInGripper[1]) < 1e-4);
     QVERIFY(std::abs(result.pointInGripper[2] - pointInGripper[2]) < 1e-4);
     QVERIFY(result.eyeToHandPointReport.rmseM < 1e-6);
+}
+
+void HandeyeUnitTest::eyeToHandPointReportsRankCondition()
+{
+    CalibrationDataset dataset;
+    dataset.mode = CalibrationMode::EyeToHand;
+    dataset.inputMode = CalibrationInputMode::FixedPoint3D;
+    const cv::Matx44d cameraToBase = matrix::fromRodrigues({0.18, -0.1, 0.12}, {0.3, 0.15, 0.9});
+    const cv::Vec3d pointInGripper(0.04, -0.03, 0.12);
+    for (int index = 0; index < 12; ++index) {
+        const Vector3 rotation{0.11 * std::sin(index * 0.5), 0.16 * std::cos(index * 0.33),
+                               0.09 * std::sin(index * 0.27 + 0.1)};
+        const Vector3 translation{0.03 * index, 0.02 * std::sin(index * 0.8), 0.2 + 0.04 * index};
+        const cv::Matx44d robot = matrix::fromRodrigues(rotation, translation);
+        const cv::Vec3d pointCamera = pointOf(matrix::inverse(cameraToBase) * robot,
+                                              {pointInGripper[0], pointInGripper[1], pointInGripper[2]});
+        PointSample sample;
+        sample.id = index + 1;
+        sample.gripperRotation = rotation;
+        sample.gripperTranslation = translation;
+        sample.cameraPoint = {pointCamera[0], pointCamera[1], pointCamera[2]};
+        dataset.pointSamples.append(sample);
+    }
+    const CalibrationResult result = EyeToHandCalibrationService::calibrate(dataset, CalibrationMethod::PointBased);
+    QVERIFY(result.eyeToHandPointReport.available);
+    QCOMPARE(result.eyeToHandPointReport.linearRank, 15);
+    QVERIFY(result.eyeToHandPointReport.fullRank);
+    QVERIFY(std::isfinite(result.eyeToHandPointReport.linearConditionNumber));
+
+    CalibrationDataset degenerate = dataset;
+    for (PointSample &sample : degenerate.pointSamples) {
+        sample.gripperRotation = {};
+        sample.gripperTranslation = {};
+        sample.cameraPoint = {0.1, 0.2, 0.5};
+    }
+    const CalibrationResult degenerateResult = EyeToHandCalibrationService::calibrate(
+        degenerate, CalibrationMethod::PointBased);
+    QVERIFY(!degenerateResult.success);
+    QVERIFY(degenerateResult.eyeToHandPointReport.linearRank < 15
+            || !degenerateResult.eyeToHandPointReport.conditionAcceptable);
 }
 
 void HandeyeUnitTest::eyeToHandJsonRoundTripKeepsDirections()

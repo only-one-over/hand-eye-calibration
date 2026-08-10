@@ -1,5 +1,6 @@
 #include "core/nonlinear_optimizer.h"
 
+#include "core/calibration_service.h"
 #include "core/matrix_utils.h"
 #include "core/normalized_huber.h"
 #include "core/pose_quality_service.h"
@@ -63,28 +64,13 @@ void fillReportFromFixedPose(const FixedTargetPoseReport &fixed,
                              CalibrationResult *result)
 {
     result->fixedTargetReport = fixed;
-    result->axXbReport.available = fixed.success;
-    result->axXbReport.valid = fixed.success;
-    result->axXbReport.sampleCount = fixed.samples.size();
-    result->axXbReport.outlierCount = fixed.outlierCount;
-    result->axXbReport.rotationRmseDeg = fixed.rotationRmseDeg;
-    result->axXbReport.translationRmseM = fixed.translationRmseM;
-    result->axXbReport.rotationMeanDeg = fixed.rotationMeanDeg;
-    result->axXbReport.translationMeanM = fixed.translationMeanM;
-    result->axXbReport.rotationMaxDeg = fixed.rotationMaxDeg;
-    result->axXbReport.translationMaxM = fixed.translationMaxM;
-    result->axXbReport.passed = fixed.success && fixed.outlierCount == 0
-                                    && fixed.rotationRmseDeg <= 0.5
-                                    && fixed.translationRmseM <= 0.001;
-    result->trainingReport = result->axXbReport;
-    result->rotationErrorDeg = fixed.rotationRmseDeg;
-    result->translationError = fixed.translationRmseM;
 }
 
 } // namespace
 
 CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &dataset,
-                                                 const CalibrationResult &seed)
+                                                 const CalibrationResult &seed,
+                                                 int maxIterations)
 {
     CalibrationResult result = seed;
     result.method = CalibrationMethod::Nonlinear;
@@ -109,7 +95,7 @@ CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &datas
     result.optimizationReport.normalizedHuberLossBefore = initialResiduals.loss;
     double currentLoss = initialResiduals.loss;
     double lambda = 1e-3;
-    for (int iteration = 0; iteration < 50; ++iteration) {
+    for (int iteration = 0; iteration < std::max(1, maxIterations); ++iteration) {
         const ResidualSet base = residuals(dataset, state);
         cv::Mat hessian = cv::Mat::zeros(6, 6, CV_64F);
         cv::Mat gradient = cv::Mat::zeros(6, 1, CV_64F);
@@ -162,11 +148,15 @@ CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &datas
         trial.pose = matrix::fromRodrigues(trialRotation, trialTranslation);
         const double trialLoss = residuals(dataset, trial).loss;
         if (trialLoss < currentLoss) {
+            const double previousLoss = currentLoss;
             state = trial;
             currentLoss = trialLoss;
             lambda = std::max(lambda * 0.5, 1e-9);
             result.optimizationReport.iterations = iteration + 1;
-            if (cv::norm(delta) < 1e-8) {
+            const bool tinyStep = cv::norm(delta) < 1e-8;
+            const bool tinyLossChange = std::abs(previousLoss - trialLoss)
+                                        <= 1e-8 * std::max(1.0, std::abs(previousLoss));
+            if (tinyStep || tinyLossChange) {
                 result.optimizationReport.converged = true;
                 break;
             }
@@ -179,16 +169,22 @@ CalibrationResult NonlinearOptimizer::refinePose(const CalibrationDataset &datas
     const FixedTargetPoseReport after = PoseQualityService::computeFixedTargetPose(
         dataset, result.cameraToGripper);
     fillReportFromFixedPose(after, &result);
+    result.axXbReport = CalibrationService::evaluateAxXb(dataset, result.cameraToGripper);
+    result.trainingReport = result.axXbReport;
+    result.rotationErrorDeg = result.axXbReport.rotationRmseDeg;
+    result.translationError = result.axXbReport.translationRmseM;
     result.optimizationReport.afterRotationRmseDeg = after.rotationRmseDeg;
     result.optimizationReport.afterTranslationRmseM = after.translationRmseM;
     const ResidualSet finalResiduals = residuals(dataset, state);
     result.optimizationReport.normalizedHuberLossAfter = finalResiduals.loss;
-    result.optimizationReport.success = after.success;
+    result.optimizationReport.success = result.axXbReport.valid && after.success;
     result.optimizationReport.huberOutlierCount = 0;
     for (double score : finalResiduals.normalizedScores)
         result.optimizationReport.huberOutlierCount += score > 1.0 ? 1 : 0;
+    result.success = result.axXbReport.valid && after.success;
     result.message = result.optimizationReport.converged
-                         ? QStringLiteral("非线性精修收敛。")
+                         ? (result.axXbReport.passed ? QStringLiteral("非线性精修收敛，AX=XB 通过。")
+                                                       : QStringLiteral("非线性精修收敛，但 AX=XB 未通过。"))
                          : QStringLiteral("非线性精修完成，但未达到严格收敛条件。");
     return result;
 }

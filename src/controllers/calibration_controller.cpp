@@ -81,8 +81,9 @@ void CalibrationController::synchronizeParameters(const PoseInputSpec &spec, con
 {
     PoseInputSpec normalizedSpec = spec;
     normalizedSpec.direction = PoseDirection::GripperToBase;
-    const bool specChanged = !inputSpecEqual(m_dataset.inputSpec, normalizedSpec)
-                             || m_dataset.robotName != robot || m_dataset.cameraName != camera;
+    const bool poseSpecChanged = !inputSpecEqual(m_dataset.inputSpec, normalizedSpec);
+    const bool metadataChanged = m_dataset.robotName != robot || m_dataset.cameraName != camera;
+    const bool specChanged = poseSpecChanged || metadataChanged;
     const bool boardChanged = !boardSpecEqual(m_dataset.boardSpec, board);
     const bool intrinsicsChanged = !intrinsicsEqual(m_dataset.cameraIntrinsics, intrinsics);
     const bool modeChanged = m_dataset.mode != mode || m_dataset.inputMode != inputMode;
@@ -101,17 +102,24 @@ void CalibrationController::synchronizeParameters(const PoseInputSpec &spec, con
     if (translationRmseM > 0.0) m_dataset.passTranslationRmseM = translationRmseM;
     ++m_dataset.revision;
 
-    if (boardChanged || intrinsicsChanged) {
+    const bool hasPoseData = !m_dataset.samples.isEmpty() || !m_dataset.pointSamples.isEmpty()
+                             || !m_dataset.validationSamples.isEmpty();
+    const bool reimportRequiredNow = poseSpecChanged && hasPoseData;
+    if (reimportRequiredNow) {
+        const bool wasAlreadyLocked = m_dataset.poseDataNeedsReimport;
+        m_dataset.poseDataNeedsReimport = true;
+        invalidateComputedState(false,
+                                QStringLiteral("Pose Adapter 或输入规范已变化。必须使用新的输入规范重新导入原始机器人数据后才能继续标定。"));
+        if (!wasAlreadyLocked)
+            emit poseDataReimportRequired(
+                QStringLiteral("Pose Adapter 或输入规范已变化。必须使用新的输入规范重新导入原始机器人数据后才能继续标定。"));
+    } else if (boardChanged || intrinsicsChanged) {
         m_dataset.cameraCalibrationReport = {};
         invalidateComputedState(true, QStringLiteral("棋盘格或相机参数已变化，图片 PnP 位姿需要重新处理。"));
     } else if (thresholdsChanged || modeChanged) {
-        m_dataset.results.clear();
-        m_dataset.reliabilityPipelineReport = {};
-        emit resultsChanged(m_dataset.results);
-        emit reliabilityChanged(CalibrationResult{});
-        emit matrixChanged(CalibrationResult{});
-        emit statusChanged(modeChanged ? QStringLiteral("标定模式或输入模式已切换，已清除不兼容结果。")
-                                       : QStringLiteral("可靠性阈值已变化，结果需要重新评价。"));
+        invalidateComputedState(false,
+                                modeChanged ? QStringLiteral("标定模式或输入模式已切换，已清除不兼容结果。")
+                                             : QStringLiteral("可靠性阈值已变化，结果需要重新评价。"));
     } else {
         emit statusChanged(QStringLiteral("输入规范已更新，已有规范化样本保持不变。"));
     }
@@ -387,6 +395,7 @@ void CalibrationController::importCsv(const QString &path)
         emit error(QStringLiteral("导入失败"), result.error);
         return;
     }
+    m_dataset.poseDataNeedsReimport = false;
     ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已导入训练 CSV：%1，已标准化为 rad/m").arg(path));
@@ -399,6 +408,7 @@ void CalibrationController::importPoseImageCsv(const QString &path)
         emit error(QStringLiteral("导入失败"), result.error);
         return;
     }
+    m_dataset.poseDataNeedsReimport = false;
     ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已导入机器人位姿 + 标定板图片配对 CSV：%1").arg(path));
@@ -411,6 +421,7 @@ void CalibrationController::importRobotPoseCsv(const QString &path)
         emit error(QStringLiteral("导入失败"), result.error);
         return;
     }
+    m_dataset.poseDataNeedsReimport = false;
     ++m_dataset.revision;
     emitDatasetChanged();
     emit logMessage(QStringLiteral("已导入 %1 组机器人位姿，请继续上传同顺序的标定板图片。")
@@ -509,7 +520,18 @@ bool CalibrationController::processBoardImages()
 
 bool CalibrationController::ensureTargetPosesReady()
 {
+    if (!ensurePoseDataReady()) return false;
     return m_dataset.targetPosesReady || processBoardImages();
+}
+
+bool CalibrationController::ensurePoseDataReady()
+{
+    if (!m_dataset.poseDataNeedsReimport) return true;
+    const QString message = QStringLiteral(
+        "Pose Adapter 或输入规范已变化。必须使用新的输入规范重新导入原始机器人数据后才能继续标定。");
+    emit error(QStringLiteral("需要重新导入原始数据"), message);
+    emit statusChanged(message);
+    return false;
 }
 
 void CalibrationController::importValidationCsv(const QString &path)
@@ -711,6 +733,7 @@ bool CalibrationController::applyManualPoseInputs(const QVector<ManualPoseInput>
     }
 
     m_dataset.inputSpec = candidate.inputSpec;
+    m_dataset.poseDataNeedsReimport = false;
     m_dataset.mode = candidate.mode;
     m_dataset.inputMode = CalibrationInputMode::PosePairs;
     m_dataset.samples = samples;
@@ -796,6 +819,7 @@ bool CalibrationController::applyManualPointInputs(const QVector<PointSample> &i
     m_dataset.inputMode = CalibrationInputMode::FixedPoint3D;
     m_dataset.inputSpec = spec;
     m_dataset.inputSpec.direction = PoseDirection::GripperToBase;
+    m_dataset.poseDataNeedsReimport = false;
     m_dataset.pointSamples = samples;
     m_dataset.samples.clear();
     m_dataset.targetPosesReady = false;
@@ -885,6 +909,7 @@ PoseQualityReport CalibrationController::evaluatePoseQuality() const
 
 void CalibrationController::calculateSelected(CalibrationMethod method)
 {
+    if (!ensurePoseDataReady()) return;
     if (m_dataset.inputMode == CalibrationInputMode::FixedPoint3D) {
         if (m_dataset.pointSamples.size() < 5) {
             emit error(QStringLiteral("无法计算"), QStringLiteral("FixedPoint3D 至少需要 5 组点基样本。"));
@@ -1018,6 +1043,7 @@ void CalibrationController::calculateAll()
 void CalibrationController::runReliabilityPipeline(int bootstrapResamples,
                                                     double confidenceLevel)
 {
+    if (!ensurePoseDataReady()) return;
     const int resamples = bootstrapResamples > 0 ? bootstrapResamples : m_dataset.bootstrapResamples;
     const double confidence = confidenceLevel > 0.0 ? confidenceLevel : m_dataset.bootstrapConfidence;
     if (resamples <= 0 || confidence <= 0.0 || confidence >= 1.0) {

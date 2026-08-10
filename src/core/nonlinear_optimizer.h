@@ -8,7 +8,8 @@ class NonlinearOptimizer
 {
 public:
     static CalibrationResult refinePose(const CalibrationDataset &dataset,
-                                        const CalibrationResult &seed);
+                                        const CalibrationResult &seed,
+                                        int maxIterations = 50);
 };
 
 } // namespace handeye

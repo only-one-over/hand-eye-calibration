@@ -150,15 +150,23 @@ docs/plans/   功能设计与实施计划
 结果页提供 fixed target pose、每个 sample 到鲁棒均值或指定 reference 的误差、Huber 非线性精修、优化前后 RMSE，以及由样本数量、旋转幅度、旋转轴和空间分布组成的 Pose Quality Score。
 
 标定板支持 Chessboard（`findChessboardCornersSB` 优先、Classic 回退）、ChArUco 和 ArUco Grid。平面 PnP 会比较 `SOLVEPNP_ITERATIVE` 与 `SOLVEPNP_IPPE`，并保存检测器、PnP 方法和误差摘要。
-## Reliability pipeline
+## 可靠性流水线与诊断
 
-The reliability run is ordered as:
+完整流水线顺序为：
 
-`motion excitation -> PnP quality -> five algorithms -> AX=XB -> Fixed Target -> single-sample outlier verification -> normalized Huber -> bootstrap`.
+`运动激励检查 → PnP 质量检查 → 原始算法 → AX=XB/AX=YB 一致性 → Fixed Target（仅 Eye-In-Hand）→ 单样本异常验证 → 归一化 Huber → Bootstrap`。
 
-All pose values are normalized internally to Rodrigues radians and meters. Eye-In-Hand exports ``camera->gripper``; Eye-To-Hand exports ``camera->base`` and the corresponding TCP target or point result.
+所有姿态在内部统一为 Rodrigues 弧度和米。Eye-In-Hand 导出 `camera→gripper`；Eye-To-Hand 导出 `camera→base`，并同时给出 `target→gripper` 或 TCP 上特征点坐标。
 
-Normalized Huber uses a 1 degree rotation scale and a 1 mm translation scale. Bootstrap reports ``successRate`` in ``[0,1]``, while ``confidenceLevel`` controls the uncertainty interval. The result metadata keeps the AX=XB report separate from the Fixed Target report.
+Nonlinear 精修后会重新独立计算 AX=XB 报告和 Fixed Target 报告，二者不会互相覆盖。归一化 Huber 使用 1° 旋转尺度和 1 mm 平移尺度。Bootstrap 的 `successRate` 始终为 `[0,1]` 范围内的成功重采样比例；`confidenceLevel` 只表示置信区间水平。
+
+5～7 组样本使用“保留全部原始样本 + 随机补充重复样本”的小样本稳定模式，仍输出成功率，但 `uncertaintyReliable=false`，不确定度只作为参考。8 组及以上才使用普通有放回 Bootstrap。样本少于 5 组时不会执行 Bootstrap。
+
+Eye-To-Hand FixedPoint3D 会对 `3N×15` 线性初值系统执行 SVD 诊断，结果页和导出文件包含 `rank`、`condition number`、满秩状态及条件数是否不超过 `1e8`。秩不足会阻止点基求解，条件数过高会保留结果但标记为未通过。
+
+修改 Pose Adapter、旋转格式、角度单位、长度单位或姿态约定后，程序保留旧样本供查看，但锁定计算并提示“必须重新导入原始机器人数据”。重新导入机器人 CSV、配对 CSV 或重新应用手动数据后才会解除锁定；仅修改机器人/相机名称不会触发该机制。
+
+本地测试包括固定随机种子的 100 轮 Monte-Carlo：每轮包含 0.5 mm/0.0005 rad 机器人噪声、0.8 mm/0.001 rad PnP 噪声和约 10% 大异常点，并验证原始算法、Nonlinear 精修和完整可靠性流水线。
 
 Run the local checks after configuring the project:
 

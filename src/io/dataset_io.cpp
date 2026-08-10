@@ -474,6 +474,9 @@ BootstrapReport bootstrapReportFromJson(const QJsonObject &object)
     report.rawSuccessfulResamples = object.value(QStringLiteral("raw_successful_resamples")).toInt();
     report.nonlinearSuccessfulResamples = object.value(QStringLiteral("nonlinear_successful_resamples")).toInt();
     report.invalidResamples = object.value(QStringLiteral("invalid_resamples")).toInt();
+    report.smallSampleMode = object.value(QStringLiteral("small_sample_mode")).toBool();
+    report.uncertaintyReliable = object.value(QStringLiteral("uncertainty_reliable")).toBool();
+    report.minimumUniqueSamples = object.value(QStringLiteral("minimum_unique_samples")).toInt();
     for (const QJsonValue &value : object.value(QStringLiteral("warnings")).toArray())
         report.warnings.append(value.toString());
     report.message = object.value(QStringLiteral("message")).toString();
@@ -605,7 +608,12 @@ QJsonObject eyeToHandPointReportToJson(const EyeToHandPointReport &report)
             {QStringLiteral("camera_to_base"), matrixToJson(report.cameraToBase)},
             {QStringLiteral("point_in_gripper_m"), vectorToJson(report.pointInGripper)},
             {QStringLiteral("rmse_m"), report.rmseM}, {QStringLiteral("mean_error_m"), report.meanErrorM},
-            {QStringLiteral("max_error_m"), report.maxErrorM}, {QStringLiteral("outlier_count"), report.outlierCount},
+            {QStringLiteral("max_error_m"), report.maxErrorM},
+            {QStringLiteral("linear_rank"), report.linearRank},
+            {QStringLiteral("linear_condition_number"), report.linearConditionNumber},
+            {QStringLiteral("full_rank"), report.fullRank},
+            {QStringLiteral("condition_acceptable"), report.conditionAcceptable},
+            {QStringLiteral("outlier_count"), report.outlierCount},
             {QStringLiteral("errors"), QJsonArray::fromStringList(report.errors)},
             {QStringLiteral("warnings"), QJsonArray::fromStringList(report.warnings)},
             {QStringLiteral("samples"), samples}};
@@ -621,6 +629,10 @@ EyeToHandPointReport eyeToHandPointReportFromJson(const QJsonObject &object)
     report.rmseM = object.value(QStringLiteral("rmse_m")).toDouble();
     report.meanErrorM = object.value(QStringLiteral("mean_error_m")).toDouble();
     report.maxErrorM = object.value(QStringLiteral("max_error_m")).toDouble();
+    report.linearRank = object.value(QStringLiteral("linear_rank")).toInt();
+    report.linearConditionNumber = object.value(QStringLiteral("linear_condition_number")).toDouble();
+    report.fullRank = object.value(QStringLiteral("full_rank")).toBool();
+    report.conditionAcceptable = object.value(QStringLiteral("condition_acceptable")).toBool();
     report.outlierCount = object.value(QStringLiteral("outlier_count")).toInt();
     for (const QJsonValue &value : object.value(QStringLiteral("errors")).toArray()) report.errors.append(value.toString());
     for (const QJsonValue &value : object.value(QStringLiteral("warnings")).toArray()) report.warnings.append(value.toString());
@@ -687,6 +699,9 @@ QJsonObject bootstrapReportToJson(const BootstrapReport &report)
             {QStringLiteral("raw_successful_resamples"), report.rawSuccessfulResamples},
             {QStringLiteral("nonlinear_successful_resamples"), report.nonlinearSuccessfulResamples},
             {QStringLiteral("invalid_resamples"), report.invalidResamples},
+            {QStringLiteral("small_sample_mode"), report.smallSampleMode},
+            {QStringLiteral("uncertainty_reliable"), report.uncertaintyReliable},
+            {QStringLiteral("minimum_unique_samples"), report.minimumUniqueSamples},
             {QStringLiteral("confidence_level"), report.confidenceLevel},
             {QStringLiteral("rotation_std_deg"), vectorToJson(report.rotationStdDeg)},
             {QStringLiteral("translation_std_m"), vectorToJson(report.translationStdM)},
@@ -1171,6 +1186,7 @@ IoResult writeJson(const QString &filePath, const CalibrationDataset &dataset)
         {QStringLiteral("bootstrap_confidence"), dataset.bootstrapConfidence},
         {QStringLiteral("created_at"), dataset.createdAt.toString(Qt::ISODate)},
         {QStringLiteral("dataset_revision"), static_cast<qint64>(dataset.revision)},
+        {QStringLiteral("pose_data_needs_reimport"), dataset.poseDataNeedsReimport},
         {QStringLiteral("target_poses_ready"), dataset.targetPosesReady},
         {QStringLiteral("samples"), samples}, {QStringLiteral("validation_samples"), validationSamples},
         {QStringLiteral("point_samples"), pointSamples},
@@ -1248,6 +1264,7 @@ IoResult readJson(const QString &filePath, CalibrationDataset *dataset)
     parsed.bootstrapConfidence = root.value(QStringLiteral("bootstrap_confidence")).toDouble(parsed.bootstrapConfidence);
     parsed.createdAt = QDateTime::fromString(root.value(QStringLiteral("created_at")).toString(), Qt::ISODate);
     parsed.revision = static_cast<quint64>(root.value(QStringLiteral("dataset_revision")).toInteger());
+    parsed.poseDataNeedsReimport = root.value(QStringLiteral("pose_data_needs_reimport")).toBool(false);
     for (const QJsonValue &value : root.value(QStringLiteral("samples")).toArray())
         parsed.samples.append(sampleFromJson(value.toObject()));
     for (const QJsonValue &value : root.value(QStringLiteral("validation_samples")).toArray())
@@ -1315,6 +1332,7 @@ IoResult writeYaml(const QString &filePath, const CalibrationDataset &dataset)
            << "pass_translation_rmse_m: " << dataset.passTranslationRmseM << "\n"
            << "bootstrap_resamples: " << dataset.bootstrapResamples << "\n"
            << "bootstrap_confidence: " << dataset.bootstrapConfidence << "\n"
+           << "pose_data_needs_reimport: " << (dataset.poseDataNeedsReimport ? "true" : "false") << "\n"
            << "reliability_pipeline:\n"
            << "  available: " << (dataset.reliabilityPipelineReport.available ? "true" : "false") << "\n"
            << "  success: " << (dataset.reliabilityPipelineReport.success ? "true" : "false") << "\n"
@@ -1338,8 +1356,20 @@ IoResult writeYaml(const QString &filePath, const CalibrationDataset &dataset)
            << "    successful_resamples: " << dataset.reliabilityPipelineReport.bootstrapReport.successfulResamples << "\n"
            << "    confidence_level: " << dataset.reliabilityPipelineReport.bootstrapReport.confidenceLevel << "\n"
            << "    success_rate: " << dataset.reliabilityPipelineReport.bootstrapReport.successRate << "\n"
+           << "    small_sample_mode: "
+           << (dataset.reliabilityPipelineReport.bootstrapReport.smallSampleMode ? "true" : "false") << "\n"
+           << "    uncertainty_reliable: "
+           << (dataset.reliabilityPipelineReport.bootstrapReport.uncertaintyReliable ? "true" : "false") << "\n"
            << "    rotation_norm_std_deg: " << dataset.reliabilityPipelineReport.bootstrapReport.rotationNormStdDeg << "\n"
            << "    translation_norm_std_m: " << dataset.reliabilityPipelineReport.bootstrapReport.translationNormStdM << "\n"
+           << "  eye_to_hand_point_diagnostics:\n"
+           << "    linear_rank: " << dataset.reliabilityPipelineReport.eyeToHandPointReport.linearRank << "\n"
+           << "    linear_condition_number: "
+           << dataset.reliabilityPipelineReport.eyeToHandPointReport.linearConditionNumber << "\n"
+           << "    full_rank: "
+           << (dataset.reliabilityPipelineReport.eyeToHandPointReport.fullRank ? "true" : "false") << "\n"
+           << "    condition_acceptable: "
+           << (dataset.reliabilityPipelineReport.eyeToHandPointReport.conditionAcceptable ? "true" : "false") << "\n"
            << "last_board_pdf_report:\n"
            << "  success: " << (dataset.lastBoardPdfReport.success ? "true" : "false") << "\n"
            << "  reused: " << (dataset.lastBoardPdfReport.reused ? "true" : "false") << "\n"
@@ -1426,21 +1456,37 @@ IoResult writeResultTxt(const QString &filePath, const CalibrationDataset &datas
            << "\nAX=XB rotation mean/max (deg): " << result.axXbReport.rotationMeanDeg << "/"
            << result.axXbReport.rotationMaxDeg << "\nAX=XB translation mean/max (m): "
            << result.axXbReport.translationMeanM << "/" << result.axXbReport.translationMaxM
-           << "\npassed: " << (result.axXbReport.passed ? "true" : "false")
-           << "\n\nFixed Target consistency:\n"
-           << "available: " << (result.fixedTargetReport.available ? "true" : "false")
-           << "\nrotation RMSE (deg): " << result.fixedTargetReport.rotationRmseDeg
-           << "\ntranslation RMSE (m): " << result.fixedTargetReport.translationRmseM
-           << "\nmean rotation/translation: " << result.fixedTargetReport.rotationMeanDeg << " / "
-           << result.fixedTargetReport.translationMeanM
-           << "\nmax rotation/translation: " << result.fixedTargetReport.rotationMaxDeg << " / "
-           << result.fixedTargetReport.translationMaxM
-           << "\noutliers: " << result.fixedTargetReport.outlierCount
-           << "\npose quality score: " << result.qualityReport.totalScore << " ("
+           << "\npassed: " << (result.axXbReport.passed ? "true" : "false") << '\n';
+    if (!eyeToHand) {
+        stream << "\nFixed Target consistency:\n"
+               << "available: " << (result.fixedTargetReport.available ? "true" : "false")
+               << "\nrotation RMSE (deg): " << result.fixedTargetReport.rotationRmseDeg
+               << "\ntranslation RMSE (m): " << result.fixedTargetReport.translationRmseM
+               << "\nmean rotation/translation: " << result.fixedTargetReport.rotationMeanDeg << " / "
+               << result.fixedTargetReport.translationMeanM
+               << "\nmax rotation/translation: " << result.fixedTargetReport.rotationMaxDeg << " / "
+               << result.fixedTargetReport.translationMaxM
+               << "\noutliers: " << result.fixedTargetReport.outlierCount << '\n';
+    } else if (result.eyeToHandPointReport.available) {
+        stream << "\nEye-To-Hand FixedPoint3D consistency:\n"
+               << "linear rank: " << result.eyeToHandPointReport.linearRank << "/15"
+               << "\nlinear condition number: " << result.eyeToHandPointReport.linearConditionNumber
+               << "\nfull rank: " << (result.eyeToHandPointReport.fullRank ? "true" : "false")
+               << "\ncondition acceptable: "
+               << (result.eyeToHandPointReport.conditionAcceptable ? "true" : "false")
+               << "\nRMSE (m): " << result.eyeToHandPointReport.rmseM
+               << "\noutliers: " << result.eyeToHandPointReport.outlierCount << '\n';
+    } else {
+        stream << "\nEye-To-Hand AX=YB consistency report is stored separately.\n";
+    }
+    stream << "\npose quality score: " << result.qualityReport.totalScore << " ("
            << result.qualityReport.level << ")"
            << "\noptimization translation RMSE before/after (m): "
            << result.optimizationReport.beforeTranslationRmseM << "/"
-           << result.optimizationReport.afterTranslationRmseM << '\n';
+           << result.optimizationReport.afterTranslationRmseM
+           << "\nbootstrap success rate: " << result.bootstrapReport.successRate
+           << "\nbootstrap uncertainty reliable: "
+           << (result.bootstrapReport.uncertaintyReliable ? "true" : "false") << '\n';
     return {true, {}};
 }
 
@@ -1458,6 +1504,10 @@ IoResult writeResultCpp(const QString &filePath, const CalibrationDataset &datas
            << "// Robot: " << dataset.robotName << ", Camera: " << dataset.cameraName << "\n"
            << "// Pose quality score: " << result.qualityReport.totalScore << " ("
            << result.qualityReport.level << ")\n"
+           << "// AX=XB RMSE: " << result.axXbReport.rotationRmseDeg << " deg, "
+           << result.axXbReport.translationRmseM << " m\n"
+           << "// Bootstrap success rate: " << result.bootstrapReport.successRate
+           << ", uncertainty reliable: " << (result.bootstrapReport.uncertaintyReliable ? "true" : "false") << "\n"
            << (eyeToHand ? "const cv::Matx44d cameraToBase = (cv::Matx44d() << "
                           : "const cv::Matx44d cameraToGripper = (cv::Matx44d() << ");
     for (int row = 0; row < 4; ++row)
@@ -1470,6 +1520,9 @@ IoResult writeResultCpp(const QString &filePath, const CalibrationDataset &datas
             for (int col = 0; col < 4; ++col) stream << result.targetToGripper[row][col] << (row == 3 && col == 3 ? ")" : ",");
         stream << ";\n";
     }
+    if (eyeToHand && result.eyeToHandPointReport.available)
+        stream << "// FixedPoint3D linear rank: " << result.eyeToHandPointReport.linearRank
+               << "/15, condition number: " << result.eyeToHandPointReport.linearConditionNumber << "\n";
     return {true, {}};
 }
 
@@ -1487,6 +1540,10 @@ IoResult writeResultPython(const QString &filePath, const CalibrationDataset &da
            << "# Robot: " << dataset.robotName << ", Camera: " << dataset.cameraName << "\n"
            << "# Pose quality score: " << result.qualityReport.totalScore << " ("
            << result.qualityReport.level << ")\n"
+           << "# AX=XB RMSE: " << result.axXbReport.rotationRmseDeg << " deg, "
+           << result.axXbReport.translationRmseM << " m\n"
+           << "# Bootstrap success rate: " << result.bootstrapReport.successRate
+           << ", uncertainty reliable: " << (result.bootstrapReport.uncertaintyReliable ? "true" : "false") << "\n"
            << "import numpy as np\n\n"
            << (eyeToHand ? "camera_to_base = np.array([\n" : "camera_to_gripper = np.array([\n");
     for (const auto &row : primaryMatrix)
@@ -1501,6 +1558,9 @@ IoResult writeResultPython(const QString &filePath, const CalibrationDataset &da
     if (eyeToHand && result.eyeToHandPointReport.available)
         stream << "\npoint_in_gripper = np.array([" << result.pointInGripper[0] << ", "
                << result.pointInGripper[1] << ", " << result.pointInGripper[2] << "], dtype=float)\n";
+    if (eyeToHand && result.eyeToHandPointReport.available)
+        stream << "# FixedPoint3D linear rank: " << result.eyeToHandPointReport.linearRank
+               << "/15, condition number: " << result.eyeToHandPointReport.linearConditionNumber << "\n";
     return {true, {}};
 }
 
