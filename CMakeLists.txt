@@ -175,6 +175,14 @@ add_test(NAME handeye_unit_tests COMMAND handeye_tests)
 add_test(NAME handeye_smoke_test COMMAND hand_eye_calibration --smoke-test -platform offscreen)
 add_test(NAME handeye_pipeline_test COMMAND hand_eye_calibration --pipeline-test -platform offscreen)
 
+set(HAND_EYE_MONTE_CARLO_SOURCES ${HAND_EYE_TEST_SOURCES})
+list(REMOVE_ITEM HAND_EYE_MONTE_CARLO_SOURCES tests/handeye_unit_test.cpp)
+list(APPEND HAND_EYE_MONTE_CARLO_SOURCES tests/monte_carlo_test.cpp)
+qt_add_executable(handeye_monte_carlo_tests ${HAND_EYE_MONTE_CARLO_SOURCES})
+target_include_directories(handeye_monte_carlo_tests PRIVATE src)
+target_link_libraries(handeye_monte_carlo_tests PRIVATE Qt6::Test Qt6::Widgets Qt6::Concurrent ${OpenCV_LIBS})
+add_test(NAME handeye_monte_carlo_test COMMAND handeye_monte_carlo_tests)
+
 include(GNUInstallDirs)
 install(TARGETS hand_eye_calibration
     BUNDLE DESTINATION .

@@ -85,6 +85,7 @@ signals:
     void cameraCalibrationStarted();
     void cameraCalibrationFinished();
     void error(const QString &title, const QString &message);
+    void poseDataReimportRequired(const QString &message);
 
 private:
     void applyResiduals(const AxXbReport &report);
@@ -93,6 +94,7 @@ private:
     void clearImageBackedPoses();
     quint64 beginCalculation();
     bool isCurrentCalculation(quint64 revision, quint64 requestId) const;
+    bool ensurePoseDataReady();
     CalibrationResult recommendedResult() const;
     void emitCameraCalibrationChanged();
 

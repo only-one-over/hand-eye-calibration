@@ -268,6 +268,10 @@ struct EyeToHandPointReport {
     double rmseM = 0.0;
     double meanErrorM = 0.0;
     double maxErrorM = 0.0;
+    int linearRank = 0;
+    double linearConditionNumber = 0.0;
+    bool fullRank = false;
+    bool conditionAcceptable = false;
     int outlierCount = 0;
     QVector<FixedPointSample> samples;
     QStringList errors;
@@ -327,6 +331,9 @@ struct BootstrapReport {
     int rawSuccessfulResamples = 0;
     int nonlinearSuccessfulResamples = 0;
     int invalidResamples = 0;
+    bool smallSampleMode = false;
+    bool uncertaintyReliable = false;
+    int minimumUniqueSamples = 0;
     CalibrationMethod baseMethod = CalibrationMethod::Tsai;
     double confidenceLevel = 0.95;
     Vector3 rotationStdDeg{};
@@ -450,6 +457,9 @@ struct CalibrationDataset {
     QVector<PointSample> pointSamples;
     CalibrationMode mode = CalibrationMode::EyeInHand;
     PoseInputSpec inputSpec;
+    // Canonical samples are intentionally retained when the input convention changes,
+    // but they must not be reinterpreted silently. A fresh raw import clears this lock.
+    bool poseDataNeedsReimport = false;
     QString robotName = QStringLiteral("未指定机器人");
     QString cameraName = QStringLiteral("未指定相机");
     QString notes;
